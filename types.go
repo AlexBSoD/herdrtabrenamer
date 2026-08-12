@@ -37,6 +37,13 @@ type eventKind struct {
 // paneInfo holds the pane fields we consume. The API returns more (scroll,
 // agent_session, tokens, state_labels); they are left out on purpose.
 type paneInfo struct {
+	// Revision (protocol 19+) is bumped by the server on every pane state
+	// change, including a foreground process starting or exiting. Verified on
+	// 0.8.0: an idle shell sat at 1, `sleep 45` took it to 2, and the process
+	// exiting took it to 5. That makes it a valid cache key for
+	// pane.process_info. It is absent (0) on older servers, where the cache
+	// must stay disabled.
+	Revision           uint64 `json:"revision"`
 	PaneID             string `json:"pane_id"`
 	TabID              string `json:"tab_id"`
 	WorkspaceID        string `json:"workspace_id"`
@@ -70,6 +77,30 @@ type tabListResult struct {
 type paneListResult struct {
 	Type  string     `json:"type"`
 	Panes []paneInfo `json:"panes"`
+}
+
+// session.snapshot (protocol 19+) returns the whole session in one response:
+// {"type":"session_snapshot","snapshot":{"tabs":[...],"panes":[...],...}}.
+// We only take the two lists; workspaces, layouts and agents are redundant for
+// naming.
+type sessionSnapshotResult struct {
+	Type     string   `json:"type"`
+	Snapshot snapshot `json:"snapshot"`
+}
+
+type snapshot struct {
+	Version  string     `json:"version"`
+	Protocol int        `json:"protocol"`
+	Tabs     []tabInfo  `json:"tabs"`
+	Panes    []paneInfo `json:"panes"`
+}
+
+// pong is the ping reply; it is how we learn the protocol version and thus
+// which methods the server supports.
+type pong struct {
+	Type     string `json:"type"`
+	Version  string `json:"version"`
+	Protocol int    `json:"protocol"`
 }
 
 type paneProcessInfoResult struct {

@@ -14,11 +14,11 @@ import (
 	"time"
 )
 
-// The events we subscribe to. All of them carry a workspace_id, so it is enough
-// to know which workspace moved and re-query its state as a whole — event
-// payloads are partial (pane_agent_detected, for one, only returns pane_id and
-// agent, without cwd or the title).
-var defaultSubscriptions = []string{
+// The events we subscribe to. Every one of them only tells us that something
+// moved; the state is then re-queried as a whole, because event payloads are
+// partial (pane_agent_detected, for one, only returns pane_id and agent,
+// without cwd or the title).
+var baseSubscriptions = []string{
 	"tab.created",
 	"tab.closed",
 	"tab.renamed",
@@ -28,6 +28,18 @@ var defaultSubscriptions = []string{
 	"pane.closed",
 	"pane.exited",
 	"pane.agent_detected",
+}
+
+// Subscriptions added on protocol 19+. Focus drives the idle/done split (an
+// agent is "done" until its tab has been seen), so these keep the status icon
+// in sync without waiting for the next poll. They are gated by protocol
+// version: an older server rejecting an unknown subscription type would fail
+// the whole events.subscribe call.
+var focusSubscriptions = []string{
+	"tab.focused",
+	"pane.focused",
+	"pane.moved",
+	"workspace.focused",
 }
 
 // The common shape of an event payload: we only take the routing fields.
@@ -54,25 +66,34 @@ func (e eventRoute) workspace() string {
 	return ""
 }
 
+// procEntry caches one pane.process_info answer. The pane revision is what
+// makes it safe: the server bumps it whenever the foreground process changes.
+type procEntry struct {
+	revision uint64
+	name     string
+}
+
 type renamer struct {
 	cli      *Client
 	tmpl     Template
 	icons    map[string]string
 	apply    bool
 	force    bool
+	needProc bool // the template references {proc}; otherwise never ask for it
 	maxLen   int
 	debounce time.Duration
 	only     string // workspace_id filter, empty means all
 
-	// refreshMu serializes the passes: the timer poll and an event-driven pass
+	// passMu serializes the passes: the timer poll and an event-driven pass
 	// would otherwise overlap and rename the same tab twice.
-	refreshMu sync.Mutex
+	passMu sync.Mutex
 
-	mu       sync.Mutex
-	state    *state            // our labels, survives a restart
-	dryShown map[string]string // tab_id -> what we already printed in dry-run
-	manual   map[string]bool   // tab_id -> the name is human-made, do not touch
-	timers   map[string]*time.Timer
+	mu        sync.Mutex
+	state     *state               // our labels, survives a restart
+	dryShown  map[string]string    // tab_id -> what we already printed in dry-run
+	manual    map[string]bool      // tab_id -> the name is human-made, do not touch
+	procCache map[string]procEntry // pane_id -> foreground process name
+	timer     *time.Timer          // event coalescing; a pass covers all workspaces
 }
 
 func main() {
@@ -123,31 +144,40 @@ func main() {
 	}
 	defer cli.Close()
 
+	if version, protocol := cli.Version(); version != "" {
+		log.Printf("herdr %s (protocol %d), session.snapshot %s",
+			version, protocol, enabledIf(protocol >= protocolSnapshot))
+	} else {
+		log.Print("herdr version unknown (ping failed), falling back to tab.list + pane.list")
+	}
+
 	st := LoadState(*statePath)
 	if len(st.Labels) > 0 {
 		log.Printf("state: %d labels from %s", len(st.Labels), *statePath)
 	}
 
+	tmpl := ParseTemplate(*format)
 	r := &renamer{
-		cli:      cli,
-		tmpl:     ParseTemplate(*format),
-		icons:    iconMap,
-		apply:    *apply,
-		force:    *force,
-		maxLen:   *maxLen,
-		debounce: *debounce,
-		only:     *workspace,
-		state:    st,
-		dryShown: map[string]string{},
-		manual:   map[string]bool{},
-		timers:   map[string]*time.Timer{},
+		cli:       cli,
+		tmpl:      tmpl,
+		icons:     iconMap,
+		apply:     *apply,
+		force:     *force,
+		needProc:  tmpl.UsesToken("proc"),
+		maxLen:    *maxLen,
+		debounce:  *debounce,
+		only:      *workspace,
+		state:     st,
+		dryShown:  map[string]string{},
+		manual:    map[string]bool{},
+		procCache: map[string]procEntry{},
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if *once {
-		if err := r.sweep(); err != nil {
+		if err := r.pass(); err != nil {
 			log.Fatalf("the first pass failed: %v", err)
 		}
 		return
@@ -159,44 +189,71 @@ func main() {
 	if *poll > 0 {
 		go r.pollLoop(ctx, *poll)
 	}
-	log.Printf("subscribing to events: %v", defaultSubscriptions)
-	if err := r.watch(ctx, *sock); err != nil && ctx.Err() == nil {
+	subs := r.subscriptions()
+	log.Printf("subscribing to events: %v", subs)
+	if err := r.watch(ctx, *sock, subs); err != nil && ctx.Err() == nil {
 		log.Fatalf("the event stream broke: %v", err)
 	}
 	log.Print("stopped")
 }
 
-// sweep recomputes the names of every tab in all workspaces (or in the given one).
-func (r *renamer) sweep() error {
-	tabs, err := r.cli.ListTabs(r.only)
+func enabledIf(ok bool) string {
+	if ok {
+		return "enabled"
+	}
+	return "unavailable"
+}
+
+func (r *renamer) subscriptions() []string {
+	if _, protocol := r.cli.Version(); protocol >= protocolSnapshot {
+		return append(append([]string{}, baseSubscriptions...), focusSubscriptions...)
+	}
+	return baseSubscriptions
+}
+
+// pass recomputes the names of every tab (or of the ones in -workspace) and
+// brings them in line with the template.
+//
+// The whole session arrives in a single Snapshot call, so one pass costs one
+// connection plus at most one pane.process_info per tab that needs {proc} and
+// whose lead pane actually changed.
+func (r *renamer) pass() error {
+	r.passMu.Lock()
+	defer r.passMu.Unlock()
+
+	tabs, panes, err := r.cli.Snapshot()
 	if err != nil {
 		return err
 	}
-	seen := map[string]bool{}
+
+	byTab := map[string][]paneInfo{}
+	live := make(map[string]bool, len(panes))
+	for _, p := range panes {
+		byTab[p.TabID] = append(byTab[p.TabID], p)
+		live[p.PaneID] = true
+	}
+
+	sort.Slice(tabs, func(i, j int) bool { return tabs[i].Number < tabs[j].Number })
 	alive := make(map[string]bool, len(tabs))
 	for _, t := range tabs {
 		if r.only != "" && t.WorkspaceID != r.only {
 			continue
 		}
-		seen[t.WorkspaceID] = true
 		alive[t.TabID] = true
-	}
-	spaces := make([]string, 0, len(seen))
-	for ws := range seen {
-		spaces = append(spaces, ws)
-	}
-	sort.Strings(spaces)
-	for _, ws := range spaces {
-		if err := r.refresh(ws); err != nil {
-			return err
-		}
+		panes := byTab[t.TabID]
+		r.reconcile(t, panes, r.procName(leadPane(panes)))
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for paneID := range r.procCache {
+		if !live[paneID] {
+			delete(r.procCache, paneID)
+		}
+	}
 	// Labels of closed tabs are no longer needed. We only prune during a full
 	// pass: with -workspace the tab list is knowingly incomplete.
 	if r.only == "" && r.apply {
-		r.mu.Lock()
-		defer r.mu.Unlock()
 		if r.state.Prune(alive) {
 			if err := r.state.Save(); err != nil {
 				log.Printf("state not saved: %v", err)
@@ -211,47 +268,40 @@ func (r *renamer) sweep() error {
 	return nil
 }
 
-// refresh re-queries the tabs and panes of a single workspace and brings the
-// names in line with the template.
-func (r *renamer) refresh(workspace string) error {
-	r.refreshMu.Lock()
-	defer r.refreshMu.Unlock()
-
-	tabs, err := r.cli.ListTabs(workspace)
-	if err != nil {
-		return err
-	}
-	panes, err := r.cli.ListPanes(workspace)
-	if err != nil {
-		return err
+// procName returns the foreground process name of the lead pane, empty when
+// there is nothing worth naming a tab after.
+//
+// We ask herdr only when the template needs {proc} and only for a pane without
+// a detected agent: the agent name is more precise, and an agent's foreground
+// group also holds its MCP servers. The answer is cached against the pane
+// revision, which the server bumps on every foreground process change — so a
+// pane where nothing happens costs nothing on subsequent passes.
+func (r *renamer) procName(lead *paneInfo) string {
+	if !r.needProc || lead == nil || lead.Agent != "" {
+		return ""
 	}
 
-	byTab := map[string][]paneInfo{}
-	for _, p := range panes {
-		byTab[p.TabID] = append(byTab[p.TabID], p)
-	}
-
-	sort.Slice(tabs, func(i, j int) bool { return tabs[i].Number < tabs[j].Number })
-	for _, t := range tabs {
-		if workspace != "" && t.WorkspaceID != workspace {
-			continue
+	if lead.Revision != 0 {
+		r.mu.Lock()
+		cached, ok := r.procCache[lead.PaneID]
+		r.mu.Unlock()
+		if ok && cached.revision == lead.Revision {
+			return cached.name
 		}
-		panes := byTab[t.TabID]
-		// We ask for the process name only for the lead pane and only when no
-		// agent was detected: an agent's foreground group also holds its MCP
-		// servers, and the agent name itself is already known.
-		proc := ""
-		if lead := leadPane(panes); lead != nil && lead.Agent == "" {
-			info, err := r.cli.ProcessInfo(lead.PaneID)
-			if err != nil {
-				log.Printf("%s: process_info failed: %v", lead.PaneID, err)
-			} else {
-				proc = ProcName(info)
-			}
-		}
-		r.reconcile(t, panes, proc)
 	}
-	return nil
+
+	info, err := r.cli.ProcessInfo(lead.PaneID)
+	if err != nil {
+		log.Printf("%s: process_info failed: %v", lead.PaneID, err)
+		return ""
+	}
+	name := ProcName(info)
+	if lead.Revision != 0 {
+		r.mu.Lock()
+		r.procCache[lead.PaneID] = procEntry{revision: lead.Revision, name: name}
+		r.mu.Unlock()
+	}
+	return name
 }
 
 // reconcile decides the fate of a single tab.
@@ -357,8 +407,11 @@ func describeLead(p *paneInfo) string {
 // pollLoop periodically reconciles the state. Events do not cover everything:
 // herdr sends no pane.updated on an agent_status change, and the
 // pane.agent_status_changed subscription requires a pane_id, so subscribing to
-// "all panes" is impossible. Measured: a daemon with only a subscription lived
-// for 75 minutes and received 3 events, while the state changed dozens of times.
+// "all panes" is impossible. Measured on 0.7.5: a daemon with only a
+// subscription lived for 75 minutes and received 3 events, while the state
+// changed dozens of times. On 0.8.0 the live stream is still quiet — a minute
+// of a busy session went by without a single event once the initial backlog had
+// been replayed.
 func (r *renamer) pollLoop(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -367,7 +420,7 @@ func (r *renamer) pollLoop(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.sweep(); err != nil && ctx.Err() == nil {
+			if err := r.pass(); err != nil && ctx.Err() == nil {
 				log.Printf("poll failed: %v", err)
 			}
 		}
@@ -376,10 +429,10 @@ func (r *renamer) pollLoop(ctx context.Context, every time.Duration) {
 
 // watch holds the subscription and reconnects when the server drops it
 // (a herdr restart, a live handoff during an update).
-func (r *renamer) watch(ctx context.Context, sock string) error {
+func (r *renamer) watch(ctx context.Context, sock string, subs []string) error {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		stream, err := Subscribe(sock, defaultSubscriptions)
+		stream, err := Subscribe(sock, subs)
 		if err != nil {
 			log.Printf("subscription failed (%v), retrying in %s", err, backoff)
 			if !sleepCtx(ctx, backoff) {
@@ -392,7 +445,7 @@ func (r *renamer) watch(ctx context.Context, sock string) error {
 
 		// The state may have drifted while we were (re)connecting — reconcile
 		// everything.
-		if err := r.sweep(); err != nil {
+		if err := r.pass(); err != nil {
 			log.Printf("post-subscription reconcile failed: %v", err)
 		}
 
@@ -432,23 +485,30 @@ func (r *renamer) consume(ctx context.Context, stream *EventStream) error {
 		if ws == "" || (r.only != "" && ws != r.only) {
 			continue
 		}
-		r.schedule(ws)
+		r.schedule()
 	}
 }
 
 // schedule coalesces the event stream: pane.updated arrives in bursts, and
-// re-querying the state for each one is wasted work.
-func (r *renamer) schedule(workspace string) {
+// re-querying the state for each one is wasted work. A single timer is enough
+// because one pass now covers every workspace at once.
+//
+// The coalescing also absorbs the backlog herdr 0.8.0 replays on every
+// events.subscribe: a fresh subscription immediately delivers dozens of past
+// events, including ones describing panes that no longer exist. Since a pass
+// re-reads the current state and ignores the payloads, a stale replay costs one
+// extra pass and nothing else.
+func (r *renamer) schedule() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if t, ok := r.timers[workspace]; ok {
-		t.Reset(r.debounce)
+	if r.timer != nil {
+		r.timer.Reset(r.debounce)
 		return
 	}
-	r.timers[workspace] = time.AfterFunc(r.debounce, func() {
-		if err := r.refresh(workspace); err != nil {
-			log.Printf("%s: refresh failed: %v", workspace, err)
+	r.timer = time.AfterFunc(r.debounce, func() {
+		if err := r.pass(); err != nil {
+			log.Printf("refresh failed: %v", err)
 		}
 	})
 }

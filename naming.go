@@ -43,6 +43,23 @@ func ParseTemplate(s string) Template {
 	return Template{parts: parts}
 }
 
+// UsesToken reports whether the template references a token, including as one
+// of the alternatives in "{proc|agent}". Asking herdr for the foreground
+// process costs a call per tab, so a template without {proc} should not pay it.
+func (t Template) UsesToken(name string) bool {
+	for _, p := range t.parts {
+		if p.token == "" {
+			continue
+		}
+		for _, alt := range strings.Split(p.token, "|") {
+			if alt == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // NameContext holds the token values for a single tab.
 type NameContext struct {
 	Agent  string

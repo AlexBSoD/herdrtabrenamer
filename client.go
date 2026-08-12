@@ -38,7 +38,16 @@ func SocketPath() string {
 type Client struct {
 	sock string
 	seq  atomic.Uint64
+
+	// version and protocol come from the ping made at Dial time; protocol
+	// decides which of the newer methods may be used.
+	version  string
+	protocol int
 }
+
+// protocolSnapshot is the first protocol version that has session.snapshot and
+// a pane revision counter (herdr 0.8.0).
+const protocolSnapshot = 19
 
 func Dial(sock string) (*Client, error) {
 	// A probe connection, so that "server is not running" is distinguishable
@@ -48,8 +57,25 @@ func Dial(sock string) (*Client, error) {
 		return nil, fmt.Errorf("connecting to %s: %w", sock, err)
 	}
 	conn.Close()
-	return &Client{sock: sock}, nil
+
+	c := &Client{sock: sock}
+	// A failed ping is not fatal: an older server simply keeps us on the
+	// tab.list + pane.list path.
+	if raw, err := c.Call("ping", nil); err == nil {
+		var p pong
+		if json.Unmarshal(raw, &p) == nil {
+			c.version, c.protocol = p.Version, p.Protocol
+		}
+	}
+	return c, nil
 }
+
+// Version reports what the server said at Dial time; both values are empty or
+// zero when the ping did not go through.
+func (c *Client) Version() (string, int) { return c.version, c.protocol }
+
+// hasSnapshot reports whether session.snapshot may be used.
+func (c *Client) hasSnapshot() bool { return c.protocol >= protocolSnapshot }
 
 func (c *Client) Close() error { return nil }
 
@@ -121,6 +147,37 @@ func (c *Client) ListPanes(workspace string) ([]paneInfo, error) {
 		return nil, err
 	}
 	return res.Panes, nil
+}
+
+// Snapshot returns every tab and pane of the session.
+//
+// On protocol 19+ this is a single session.snapshot call. Before that the same
+// picture took tab.list plus one pane.list per workspace, and since the server
+// closes the connection after each response, every one of those was a separate
+// connect. Naming needs the whole picture on every pass, so this is the hot
+// path.
+func (c *Client) Snapshot() ([]tabInfo, []paneInfo, error) {
+	if !c.hasSnapshot() {
+		tabs, err := c.ListTabs("")
+		if err != nil {
+			return nil, nil, err
+		}
+		panes, err := c.ListPanes("")
+		if err != nil {
+			return nil, nil, err
+		}
+		return tabs, panes, nil
+	}
+
+	raw, err := c.Call("session.snapshot", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	var res sessionSnapshotResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, nil, err
+	}
+	return res.Snapshot.Tabs, res.Snapshot.Panes, nil
 }
 
 func (c *Client) ProcessInfo(paneID string) (*paneProcessInfo, error) {

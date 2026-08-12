@@ -21,9 +21,9 @@ btop        btop, started in that same ~/projects/rmk
 1. Subscribes to server events via `events.subscribe`.
 2. Additionally polls the state on a timer — events do not cover everything,
    see below.
-3. Re-queries `tab.list` + `pane.list` (plus `pane.process_info` for the lead
-   pane), computes the name from the template and calls `tab.rename` wherever
-   the two diverged.
+3. Reads the whole session in one `session.snapshot` call (plus
+   `pane.process_info` for the lead panes that need it), computes the name from
+   the template and calls `tab.rename` wherever the two diverged.
 
 Pane state is deliberately not accumulated from events: the payloads are
 partial — `pane_agent_detected`, for example, only returns `pane_id` and
@@ -32,15 +32,41 @@ maintaining an incomplete model.
 
 ### Why polling and not events alone
 
-herdr does not emit events for part of the changes. Measured on a live session:
-a daemon with only a subscription lived for 75 minutes and received **3**
-events, while the state changed dozens of times. A direct check: 30 seconds of
-a `pane.updated` subscription plus a targeted `pane.agent_status_changed` for a
-specific pane produced zero events. Subscribing to the statuses of all panes is
-not possible: `pane.agent_status_changed` requires a `pane_id`.
+herdr does not emit events for part of the changes. Measured on a live session
+under 0.7.5: a daemon with only a subscription lived for 75 minutes and received
+**3** events, while the state changed dozens of times. A direct check: 30
+seconds of a `pane.updated` subscription plus a targeted
+`pane.agent_status_changed` for a specific pane produced zero events.
+Subscribing to the statuses of all panes is not possible:
+`pane.agent_status_changed` requires a `pane_id`.
+
+0.8.0 did not change this. It looks like it did — a fresh subscription delivers
+around a hundred events within seconds — but that is a replay of a backlog: the
+very same events, down to the `revision` values of panes that have since moved
+on, arrive again on every reconnect. Once the backlog is drained the stream goes
+quiet again; a minute of a busy session produced nothing.
 
 Hence `-poll 3s` (the default). Events give a fast reaction to structural
 changes, polling covers everything else. `-poll 0` leaves events only.
+
+### The cost of a pass
+
+One pass is one `session.snapshot` call — the server answers with every
+workspace, tab and pane at once. `pane.process_info` is the only extra call, and
+it is skipped whenever
+
+- the template does not mention `{proc}`,
+- the lead pane has a detected agent (the agent name is better anyway), or
+- the pane's `revision` has not moved since the last look. The server bumps that
+  counter on every foreground process change, verified in both directions: an
+  idle shell sat at `1`, `sleep 45` took it to `2`, and the process exiting took
+  it to `5`.
+
+Measured with `strace -e trace=connect` over 11 seconds at `-poll 1s`, on a
+session of two workspaces and six tabs: **70 connections before, 16 after** —
+in the steady state roughly six per pass down to one. Since the server closes
+the connection after every response (see the quirks below), a call and a
+connection are the same thing here.
 
 ## Build and run
 
@@ -190,19 +216,48 @@ own.
 - **One request per connection.** The server answers and closes the socket right
   away; a second `write` into the same connection yields a `broken pipe`. So
   every call opens its own connection, and the only long-lived one is the
-  subscription stream.
+  subscription stream. Still true on 0.8.0.
 - **`params` is mandatory**, even when empty: without it you get
   `invalid_request: missing field 'params'`.
 - **Subscriptions are named with dots** (`pane.updated`), while `data.type`
   inside an event uses underscores (`pane_updated`).
 - **`pane.agent_status_changed` requires a `pane_id`**, so subscribing to the
   statuses of all panes at once is impossible.
+- **Every subscription starts with a replay** (0.8.0): dozens of past events,
+  including ones describing panes that no longer exist. Harmless here — a pass
+  re-reads the current state and ignores the payloads — but it makes an event
+  counter a poor measure of how live a session is.
 - **Events are far from covering everything** — see the polling section above.
-- The full schema: `herdr api schema --json` (protocol 17, ~250 KB, 89 methods).
+- The full schema: `herdr api schema --json` (~250 KB, 89 methods on protocol
+  17, 90 on protocol 19).
 
-## Status
+## herdr version compatibility
 
-Verified against herdr 0.7.5 (protocol 17) and 0.8.0 (protocol 19).
+Verified against herdr 0.7.5 (protocol 17) and 0.8.0 (protocol 19). The daemon
+pings the server at startup and picks its methods from the protocol version, so
+one binary serves both; the version it found is printed in the first lines of
+the log.
+
+What 0.8.0 brought that matters here:
+
+| | protocol 17 | protocol 19 |
+|---|---|---|
+| reading the session | `tab.list` + one `pane.list` per workspace | one `session.snapshot` |
+| pane change counter | — | `revision`, used to cache `pane.process_info` |
+| focus subscriptions | not used | `tab.focused`, `pane.focused`, `pane.moved`, `workspace.focused` |
+
+What did **not** change: there is still no built-in tab naming in
+`config.toml` (only `ui.prompt_new_tab_name`, whose generated name is the
+ordinal number), the server still handles one request per connection, and
+`pane.agent_status_changed` still demands a `pane_id`. So this daemon is still
+needed, and it still polls.
+
+Other 0.8.0 additions that are not used yet but are worth knowing about:
+`pane.report_metadata` lets whatever runs inside a pane publish up to 16 custom
+`tokens` and a `title`, which a future template could name tabs after; and
+`events.wait` blocks server-side until a matching event, though its match filter
+has the same per-pane restriction as the subscription and so cannot replace the
+poll.
 
 ## License
 
