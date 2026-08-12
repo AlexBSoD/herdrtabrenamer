@@ -2,8 +2,8 @@ package main
 
 import "encoding/json"
 
-// Формы данных socket API herdr (protocol 17, schema_version 1).
-// Полную схему можно выгрузить через `herdr api schema --json`.
+// Data shapes of the herdr socket API (protocol 17+, schema_version 1).
+// The full schema can be dumped with `herdr api schema --json`.
 
 type request struct {
 	ID     string `json:"id"`
@@ -24,7 +24,7 @@ type errorBody struct {
 
 func (e *errorBody) Error() string { return e.Code + ": " + e.Message }
 
-// EventEnvelope: {"event":"pane.updated","data":{"type":"pane_updated","pane":{...}}}
+// eventEnvelope: {"event":"pane_updated","data":{"type":"pane_updated","pane":{...}}}
 type eventEnvelope struct {
 	Event string          `json:"event"`
 	Data  json.RawMessage `json:"data"`
@@ -34,8 +34,8 @@ type eventKind struct {
 	Type string `json:"type"`
 }
 
-// PaneInfo — полный набор полей из схемы; используем только часть,
-// остальные оставлены как документация того, что вообще доступно.
+// paneInfo holds the pane fields we consume. The API returns more (scroll,
+// agent_session, tokens, state_labels); they are left out on purpose.
 type paneInfo struct {
 	PaneID             string `json:"pane_id"`
 	TabID              string `json:"tab_id"`
@@ -79,8 +79,8 @@ type paneProcessInfoResult struct {
 
 type paneProcessInfo struct {
 	PaneID string `json:"pane_id"`
-	// ShellPid — сам шелл панели; foreground_processes содержит то, что он
-	// запустил, вместе с дочерними процессами той же группы.
+	// ShellPid is the pane's own shell; foreground_processes holds whatever it
+	// spawned, together with the children of the same process group.
 	ShellPid                 int           `json:"shell_pid"`
 	ForegroundProcessGroupID int           `json:"foreground_process_group_id"`
 	ForegroundProcesses      []paneProcess `json:"foreground_processes"`
@@ -89,15 +89,15 @@ type paneProcessInfo struct {
 type paneProcess struct {
 	PID  int    `json:"pid"`
 	Name string `json:"name"`
-	// Cmdline честнее Name: на NixOS запущенный claude виден как
-	// name=".claude-wrapped" при cmdline="claude".
+	// Cmdline is more honest than Name: on NixOS a running claude shows up as
+	// name=".claude-wrapped" while cmdline="claude".
 	Cmdline string   `json:"cmdline"`
 	Argv    []string `json:"argv"`
 	Argv0   string   `json:"argv0"`
 	Cwd     string   `json:"cwd"`
 }
 
-// Полезная нагрузка событий, на которые мы подписываемся.
+// Payloads of the events we subscribe to.
 type panePayload struct {
 	Type string   `json:"type"`
 	Pane paneInfo `json:"pane"`

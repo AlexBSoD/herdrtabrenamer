@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestRenderDropsDanglingSeparators(t *testing.T) {
-	full := NameContext{Agent: "claude", Dir: "nixos", Status: "working", Number: 36, Title: "заголовок"}
+	full := NameContext{Agent: "claude", Dir: "nixos", Status: "working", Number: 36, Title: "some title"}
 	noAgent := NameContext{Dir: "nixos", Status: "working", Number: 36}
 	noStatus := NameContext{Agent: "claude", Dir: "nixos", Number: 36}
 	empty := NameContext{Number: 7}
@@ -14,24 +14,24 @@ func TestRenderDropsDanglingSeparators(t *testing.T) {
 		ctx  NameContext
 		want string
 	}{
-		{"оба токена на месте", "{agent}:{dir}", full, "claude:nixos"},
-		{"пустой первый токен съедает разделитель", "{agent}:{dir}", noAgent, "nixos"},
-		{"пустой второй токен съедает разделитель", "{dir}:{agent}", noAgent, "nixos"},
-		{"замыкающий литерал сохраняется", "{number}:{dir} [{status}]", full, "36:nixos [working]"},
-		{"замыкающий литерал уходит с пустым токеном", "{dir} [{status}]", noStatus, "nixos"},
-		{"ведущий литерал сохраняется", "[{status}] {dir}", full, "[working] nixos"},
-		{"ведущий литерал уходит с пустым токеном", "[{status}] {dir}", noStatus, "nixos"},
-		{"все токены пусты", "{agent}:{dir}", empty, ""},
-		{"неизвестный токен считается пустым", "{agent}/{branch}", full, "claude"},
-		{"только литералы без токенов", "статика", full, ""},
-		{"число всегда непусто", "{number}", empty, "7"},
+		{"both tokens present", "{agent}:{dir}", full, "claude:nixos"},
+		{"empty first token eats the separator", "{agent}:{dir}", noAgent, "nixos"},
+		{"empty second token eats the separator", "{dir}:{agent}", noAgent, "nixos"},
+		{"trailing literal is kept", "{number}:{dir} [{status}]", full, "36:nixos [working]"},
+		{"trailing literal leaves with an empty token", "{dir} [{status}]", noStatus, "nixos"},
+		{"leading literal is kept", "[{status}] {dir}", full, "[working] nixos"},
+		{"leading literal leaves with an empty token", "[{status}] {dir}", noStatus, "nixos"},
+		{"all tokens empty", "{agent}:{dir}", empty, ""},
+		{"unknown token counts as empty", "{agent}/{branch}", full, "claude"},
+		{"literals only, no tokens", "static", full, ""},
+		{"number is never empty", "{number}", empty, "7"},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := ParseTemplate(c.tmpl).Render(c.ctx)
 			if got != c.want {
-				t.Errorf("шаблон %q: получено %q, ожидалось %q", c.tmpl, got, c.want)
+				t.Errorf("template %q: got %q, want %q", c.tmpl, got, c.want)
 			}
 		})
 	}
@@ -50,29 +50,29 @@ func TestTruncateCountsRunes(t *testing.T) {
 	}
 	for _, c := range cases {
 		if got := Truncate(c.in, c.max); got != c.want {
-			t.Errorf("Truncate(%q, %d) = %q, ожидалось %q", c.in, c.max, got, c.want)
+			t.Errorf("Truncate(%q, %d) = %q, want %q", c.in, c.max, got, c.want)
 		}
 	}
-	// Обрезка не должна ломать руны посередине.
+	// Truncation must not split a rune in half.
 	got := Truncate("абвгдеёжзийклмн", 5)
 	for _, r := range got {
 		if r == '�' {
-			t.Fatalf("Truncate испортил руну: %q", got)
+			t.Fatalf("Truncate mangled a rune: %q", got)
 		}
 	}
 }
 
 func TestIsGeneratedLabel(t *testing.T) {
 	generated := []string{"", "1", "42", " 7 "}
-	manual := []string{"claude:nixos", "работа", "1-й", "tab 2"}
+	manual := []string{"claude:nixos", "deploy", "1st", "tab 2"}
 	for _, l := range generated {
 		if !IsGeneratedLabel(l) {
-			t.Errorf("%q должно считаться автогенерированным", l)
+			t.Errorf("%q should count as auto-generated", l)
 		}
 	}
 	for _, l := range manual {
 		if IsGeneratedLabel(l) {
-			t.Errorf("%q должно считаться ручным", l)
+			t.Errorf("%q should count as human-made", l)
 		}
 	}
 }
@@ -83,23 +83,23 @@ func TestLeadPanePrefersAgent(t *testing.T) {
 		{PaneID: "w1:p2", Agent: "claude"},
 	}
 	if got := leadPane(panes); got == nil || got.PaneID != "w1:p2" {
-		t.Errorf("ожидалась панель с агентом, получено %+v", got)
+		t.Errorf("expected the pane with an agent, got %+v", got)
 	}
 
-	// Без агентов выигрывает сфокусированная.
+	// Without agents the focused pane wins.
 	panes = []paneInfo{{PaneID: "w1:p1"}, {PaneID: "w1:p2", Focused: true}}
 	if got := leadPane(panes); got == nil || got.PaneID != "w1:p2" {
-		t.Errorf("ожидалась сфокусированная панель, получено %+v", got)
+		t.Errorf("expected the focused pane, got %+v", got)
 	}
 
-	// Совсем без признаков — минимальный pane_id, детерминированно.
+	// With no distinguishing marks at all — the lowest pane_id, deterministically.
 	panes = []paneInfo{{PaneID: "w1:p9"}, {PaneID: "w1:p3"}}
 	if got := leadPane(panes); got == nil || got.PaneID != "w1:p3" {
-		t.Errorf("ожидалась панель w1:p3, получено %+v", got)
+		t.Errorf("expected pane w1:p3, got %+v", got)
 	}
 
 	if leadPane(nil) != nil {
-		t.Error("на пустом списке ожидался nil")
+		t.Error("expected nil for an empty list")
 	}
 }
 
@@ -108,47 +108,47 @@ func TestContextForFallbacks(t *testing.T) {
 	pane := paneInfo{
 		Agent:         "claude",
 		Cwd:           "/home/uzz/opt/nixos",
-		TerminalTitle: "сырой заголовок",
+		TerminalTitle: "raw title",
 	}
 	ctx := contextFor(tab, &pane, "", DefaultIcons)
 	if ctx.Dir != "nixos" {
-		t.Errorf("Dir = %q, ожидалось nixos", ctx.Dir)
+		t.Errorf("Dir = %q, want nixos", ctx.Dir)
 	}
-	if ctx.Title != "сырой заголовок" {
-		t.Errorf("Title должен падать обратно на terminal_title, получено %q", ctx.Title)
+	if ctx.Title != "raw title" {
+		t.Errorf("Title should fall back to terminal_title, got %q", ctx.Title)
 	}
 
-	// foreground_cwd и display_agent приоритетнее.
+	// foreground_cwd and display_agent take precedence.
 	pane.ForegroundCwd = "/home/uzz/projects/rmk"
 	pane.DisplayAgent = "Claude Code"
-	pane.TerminalTitleStrip = "чистый"
+	pane.TerminalTitleStrip = "clean"
 	ctx = contextFor(tab, &pane, "", DefaultIcons)
-	if ctx.Dir != "rmk" || ctx.Agent != "Claude Code" || ctx.Title != "чистый" {
-		t.Errorf("приоритеты не соблюдены: %+v", ctx)
+	if ctx.Dir != "rmk" || ctx.Agent != "Claude Code" || ctx.Title != "clean" {
+		t.Errorf("precedence broken: %+v", ctx)
 	}
 }
 
 func TestContextForIconFollowsPaneStatus(t *testing.T) {
 	tab := tabInfo{Number: 1, AgentStatus: "idle"}
-	// Статус панели приоритетнее статуса таба, иконка должна идти за ним.
+	// The pane status wins over the tab status, and the icon must follow it.
 	pane := paneInfo{Agent: "claude", Cwd: "/tmp/x", AgentStatus: "blocked"}
 	ctx := contextFor(tab, &pane, "", DefaultIcons)
 	if ctx.Status != "blocked" || ctx.Icon != DefaultIcons["blocked"] {
-		t.Errorf("ожидался blocked и его иконка, получено status=%q icon=%q", ctx.Status, ctx.Icon)
+		t.Errorf("expected blocked and its icon, got status=%q icon=%q", ctx.Status, ctx.Icon)
 	}
 
-	// unknown по умолчанию без иконки — токен должен исчезнуть вместе с пробелом.
+	// unknown has no icon by default — the token must vanish together with the space.
 	pane.AgentStatus = "unknown"
 	ctx = contextFor(tab, &pane, "", DefaultIcons)
 	if got := ParseTemplate("{icon} {agent}:{dir}").Render(ctx); got != "claude:x" {
-		t.Errorf("пустая иконка должна исчезать вместе с пробелом, получено %q", got)
+		t.Errorf("an empty icon should vanish together with the space, got %q", got)
 	}
 
-	// А с иконкой — префикс на месте.
+	// And with an icon the prefix is in place.
 	pane.AgentStatus = "working"
 	ctx = contextFor(tab, &pane, "", DefaultIcons)
 	if got := ParseTemplate("{icon} {agent}:{dir}").Render(ctx); got != "🟡 claude:x" {
-		t.Errorf("получено %q", got)
+		t.Errorf("got %q", got)
 	}
 }
 
@@ -164,116 +164,116 @@ func TestTokenAlternatives(t *testing.T) {
 		ctx  NameContext
 		want string
 	}{
-		{"процесс важнее агента в этом порядке", "{proc|agent}:{dir}", both, "btop:nixos"},
-		{"без процесса берётся агент", "{proc|agent}:{dir}", agentOnly, "claude:nixos"},
-		{"без агента берётся процесс", "{proc|agent}:{dir}", procOnly, "btop:rmk"},
-		{"оба пусты — остаётся каталог", "{proc|agent}:{dir}", neither, "rmk"},
-		{"тройная альтернатива без каталога", "{proc|agent|dir}", procOnly, "btop"},
-		{"тройная альтернатива падает до каталога", "{proc|agent|dir}", neither, "rmk"},
-		{"обратный приоритет тоже работает", "{agent|proc}", both, "claude"},
+		{"process beats agent in this order", "{proc|agent}:{dir}", both, "btop:nixos"},
+		{"without a process the agent is taken", "{proc|agent}:{dir}", agentOnly, "claude:nixos"},
+		{"without an agent the process is taken", "{proc|agent}:{dir}", procOnly, "btop:rmk"},
+		{"both empty — the directory remains", "{proc|agent}:{dir}", neither, "rmk"},
+		{"triple alternative without the directory", "{proc|agent|dir}", procOnly, "btop"},
+		{"triple alternative falls back to the directory", "{proc|agent|dir}", neither, "rmk"},
+		{"the reverse priority works too", "{agent|proc}", both, "claude"},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if got := ParseTemplate(c.tmpl).Render(c.ctx); got != c.want {
-				t.Errorf("шаблон %q: получено %q, ожидалось %q", c.tmpl, got, c.want)
+				t.Errorf("template %q: got %q, want %q", c.tmpl, got, c.want)
 			}
 		})
 	}
 }
 
 func TestProcName(t *testing.T) {
-	// Обычный случай: btop запущен в панели.
+	// The ordinary case: btop is running in the pane.
 	info := &paneProcessInfo{
 		ShellPid:                 100,
 		ForegroundProcessGroupID: 200,
 		ForegroundProcesses:      []paneProcess{{PID: 200, Name: "btop", Cmdline: "btop"}},
 	}
 	if got := ProcName(info); got != "btop" {
-		t.Errorf("получено %q, ожидалось btop", got)
+		t.Errorf("got %q, want btop", got)
 	}
 
-	// Шелл сам по себе — не процесс.
+	// A shell on its own is not a process.
 	info.ForegroundProcesses = []paneProcess{{PID: 200, Name: "fish", Cmdline: "/run/current-system/sw/bin/fish"}}
 	if got := ProcName(info); got != "" {
-		t.Errorf("шелл не должен попадать в имя, получено %q", got)
+		t.Errorf("a shell must not end up in the name, got %q", got)
 	}
 
-	// Обёртка NixOS: имя ".claude-wrapped", а cmdline честный.
+	// A NixOS wrapper: the name is ".claude-wrapped" while cmdline is honest.
 	info.ForegroundProcesses = []paneProcess{{PID: 200, Name: ".claude-wrapped", Cmdline: "claude"}}
 	if got := ProcName(info); got != "claude" {
-		t.Errorf("получено %q, ожидалось claude", got)
+		t.Errorf("got %q, want claude", got)
 	}
 
-	// Если cmdline пуст, обёртку надо срезать с самого имени.
+	// When cmdline is empty, the wrapper has to be stripped off the name itself.
 	info.ForegroundProcesses = []paneProcess{{PID: 200, Name: ".btop-wrapped"}}
 	if got := ProcName(info); got != "btop" {
-		t.Errorf("получено %q, ожидалось btop", got)
+		t.Errorf("got %q, want btop", got)
 	}
 
-	// Полный путь и аргументы: нужен только базовый бинарник.
+	// A full path with arguments: only the base binary is wanted.
 	info.ForegroundProcesses = []paneProcess{{PID: 200, Name: "hx", Cmdline: "/nix/store/abc-helix-25.1/bin/hx flake.nix"}}
 	if got := ProcName(info); got != "hx" {
-		t.Errorf("получено %q, ожидалось hx", got)
+		t.Errorf("got %q, want hx", got)
 	}
 
-	// В группе несколько процессов — берём лидера, а не первого в списке.
+	// Several processes in the group — take the leader, not the first in the list.
 	info.ForegroundProcessGroupID = 300
 	info.ForegroundProcesses = []paneProcess{
 		{PID: 301, Name: "mcp-server", Cmdline: "python3 mcp"},
 		{PID: 300, Name: ".claude-wrapped", Cmdline: "claude"},
 	}
 	if got := ProcName(info); got != "claude" {
-		t.Errorf("должен выбираться лидер группы, получено %q", got)
+		t.Errorf("the group leader should be chosen, got %q", got)
 	}
 
-	// Процесс совпадает с шеллом панели — значит ничего не запущено.
+	// The process is the pane's own shell — so nothing is running.
 	info.ForegroundProcessGroupID = 100
 	info.ForegroundProcesses = []paneProcess{{PID: 100, Name: "fish", Cmdline: "fish"}}
 	if got := ProcName(info); got != "" {
-		t.Errorf("получено %q, ожидалась пустая строка", got)
+		t.Errorf("got %q, want an empty string", got)
 	}
 
-	// Пограничные входы не должны паниковать.
+	// Edge inputs must not panic.
 	if got := ProcName(nil); got != "" {
-		t.Errorf("nil: получено %q", got)
+		t.Errorf("nil: got %q", got)
 	}
 	if got := ProcName(&paneProcessInfo{}); got != "" {
-		t.Errorf("пустой список: получено %q", got)
+		t.Errorf("empty list: got %q", got)
 	}
 }
 
 func TestParseIcons(t *testing.T) {
-	// Пустая строка — набор по умолчанию.
+	// An empty string means the default set.
 	icons, err := ParseIcons("")
 	if err != nil || icons["working"] != "🟡" {
-		t.Fatalf("ожидались значения по умолчанию, получено %v (err=%v)", icons, err)
+		t.Fatalf("expected the defaults, got %v (err=%v)", icons, err)
 	}
 
-	// Переопределение одного статуса не задевает остальные.
+	// Overriding one status must not disturb the others.
 	icons, err = ParseIcons("working=⚡")
 	if err != nil {
-		t.Fatalf("неожиданная ошибка: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if icons["working"] != "⚡" || icons["done"] != DefaultIcons["done"] {
-		t.Errorf("частичное переопределение сломалось: %v", icons)
+		t.Errorf("partial override broke: %v", icons)
 	}
 
-	// Пустое значение убирает иконку.
+	// An empty value removes the icon.
 	icons, err = ParseIcons("idle=")
 	if err != nil {
-		t.Fatalf("неожиданная ошибка: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if icons["idle"] != "" {
-		t.Errorf("idle должен остаться без иконки, получено %q", icons["idle"])
+		t.Errorf("idle should be left without an icon, got %q", icons["idle"])
 	}
 
-	// Мусор и неизвестные статусы — ошибка, а не тихое игнорирование.
+	// Garbage and unknown statuses are errors, not silent no-ops.
 	if _, err := ParseIcons("working"); err == nil {
-		t.Error("ожидалась ошибка на паре без знака =")
+		t.Error("expected an error for a pair without an = sign")
 	}
 	if _, err := ParseIcons("busy=🔥"); err == nil {
-		t.Error("ожидалась ошибка на неизвестном статусе")
+		t.Error("expected an error for an unknown status")
 	}
 }
 
@@ -285,25 +285,26 @@ func TestLooksOurs(t *testing.T) {
 	}
 	ctx := NameContext{Agent: "claude", Dir: "nixos", Status: "working", Icon: DefaultIcons["working"]}
 
-	// Наше же имя, но со статусом, который был раньше.
+	// Our own name, but with the status it had earlier.
 	if !r.looksOurs(ctx, "🟢 claude:nixos") {
-		t.Error("имя с другой иконкой статуса должно распознаваться как наше")
+		t.Error("a name with another status icon should be recognized as ours")
 	}
 	if !r.looksOurs(ctx, "🟡 claude:nixos") {
-		t.Error("текущее имя должно распознаваться как наше")
+		t.Error("the current name should be recognized as ours")
 	}
-	// Человеческое имя — не наше.
-	if r.looksOurs(ctx, "деплой") {
-		t.Error("постороннее имя не должно считаться нашим")
+	// A human name is not ours.
+	if r.looksOurs(ctx, "deploy") {
+		t.Error("a foreign name must not count as ours")
 	}
-	// Без иконки — это наш же рендер при статусе unknown, у которого иконки нет.
+	// Without an icon it is our own rendering for the unknown status, which has none.
 	if !r.looksOurs(ctx, "claude:nixos") {
-		t.Error("имя без иконки соответствует статусу unknown и должно считаться нашим")
+		t.Error("a name without an icon matches the unknown status and should count as ours")
 	}
 }
 
-// Регрессия: таб звался "rmk" (в панели был только шелл), пользователь запустил
-// btop — прежнее имя обязано опознаваться как наше, иначе таб замирает.
+// Regression: a tab was named "rmk" (only a shell in the pane), the user
+// started btop — the previous name must be recognized as ours, otherwise the
+// tab freezes.
 func TestLooksOursAcrossProcessAppearance(t *testing.T) {
 	r := &renamer{
 		tmpl:   ParseTemplate("{icon} {proc|agent}:{dir}"),
@@ -313,23 +314,23 @@ func TestLooksOursAcrossProcessAppearance(t *testing.T) {
 	ctx := NameContext{Proc: "btop", Dir: "rmk", Status: "unknown"}
 
 	if !r.looksOurs(ctx, "rmk") {
-		t.Error("имя без процесса должно опознаваться как наше после запуска btop")
+		t.Error("the name without a process should be recognized as ours after btop started")
 	}
 	if !r.looksOurs(ctx, "btop:rmk") {
-		t.Error("текущее имя должно опознаваться как наше")
+		t.Error("the current name should be recognized as ours")
 	}
 	if !r.looksOurs(ctx, DefaultIcons["working"]+" btop:rmk") {
-		t.Error("имя с иконкой другого статуса должно опознаваться как наше")
+		t.Error("a name with another status icon should be recognized as ours")
 	}
 
-	// Симметрично для агента: таб звался "claude:nixos", агент отвалился.
+	// Symmetrically for the agent: a tab was named "claude:nixos", the agent went away.
 	ctx = NameContext{Agent: "claude", Dir: "nixos", Status: "idle"}
 	if !r.looksOurs(ctx, "nixos") {
-		t.Error("имя без агента должно опознаваться как наше")
+		t.Error("the name without an agent should be recognized as ours")
 	}
 
-	// Постороннее имя по-прежнему чужое.
-	if r.looksOurs(ctx, "мониторинг") {
-		t.Error("человеческое имя не должно считаться нашим")
+	// A foreign name is still foreign.
+	if r.looksOurs(ctx, "monitoring") {
+		t.Error("a human name must not count as ours")
 	}
 }

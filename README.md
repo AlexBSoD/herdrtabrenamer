@@ -1,191 +1,209 @@
 # herdrtabrenamer
 
-Прототип демона, который автоматически называет табы в [herdr](https://herdr.dev)
-по тому, что в них происходит: имя запущенной программы, иначе имя каталога.
+A small daemon that names tabs in [herdr](https://herdr.dev) after what is
+actually happening inside them: the running program, otherwise the directory.
 
-В самом herdr (0.7.5) шаблонов имён нет. Есть только `ui.prompt_new_tab_name`:
-`true` — спрашивать имя руками, `false` — генерировать, и генерация это просто
-порядковый номер. Аналога tmux'ных `automatic-rename` +
-`automatic-rename-format` не существует, поэтому имена собираются снаружи через
-socket API.
+herdr itself has no name templates. There is only `ui.prompt_new_tab_name`:
+`true` asks for a name by hand, `false` generates one — and the generated name
+is just the ordinal number. There is no equivalent of tmux's
+`automatic-rename` + `automatic-rename-format`, so names are assembled from
+outside over the socket API.
 
 ```
-pi          panel с pi в ~/pi
-nixos       claude в ~/opt/nixos
-rmk         пустой шелл в ~/projects/rmk
-btop        btop, запущенный в том же ~/projects/rmk
+pi          a panel running pi in ~/pi
+nixos       claude in ~/opt/nixos
+rmk         an empty shell in ~/projects/rmk
+btop        btop, started in that same ~/projects/rmk
 ```
 
-## Как работает
+## How it works
 
-1. Подписывается на события сервера через `events.subscribe`.
-2. Дополнительно опрашивает состояние по таймеру — событий на всё не хватает,
-   см. ниже.
-3. Перезапрашивает `tab.list` + `pane.list` (+ `pane.process_info` для ведущей
-   панели), вычисляет имя по шаблону, вызывает `tab.rename` там, где разошлось.
+1. Subscribes to server events via `events.subscribe`.
+2. Additionally polls the state on a timer — events do not cover everything,
+   see below.
+3. Re-queries `tab.list` + `pane.list` (plus `pane.process_info` for the lead
+   pane), computes the name from the template and calls `tab.rename` wherever
+   the two diverged.
 
-Состояние панелей намеренно не накапливается из событий: payload'ы частичные —
-`pane_agent_detected`, например, отдаёт только `pane_id` и `agent`, без `cwd` и
-имени процесса. Перезапрос дешевле, чем поддержка неполной модели.
+Pane state is deliberately not accumulated from events: the payloads are
+partial — `pane_agent_detected`, for example, only returns `pane_id` and
+`agent`, without `cwd` or the process name. Re-querying is cheaper than
+maintaining an incomplete model.
 
-### Почему нужен опрос, а не только события
+### Why polling and not events alone
 
-herdr не присылает события на часть изменений. Измерено на живой сессии: демон
-с одной подпиской прожил 75 минут и получил **3** события, хотя состояние
-менялось десятки раз. Прямая проверка: 30 секунд подписки на `pane.updated`
-плюс точечной `pane.agent_status_changed` для конкретной панели — ноль событий.
-Подписаться на статусы всех панелей нельзя: `pane.agent_status_changed`
-требует обязательный `pane_id`.
+herdr does not emit events for part of the changes. Measured on a live session:
+a daemon with only a subscription lived for 75 minutes and received **3**
+events, while the state changed dozens of times. A direct check: 30 seconds of
+a `pane.updated` subscription plus a targeted `pane.agent_status_changed` for a
+specific pane produced zero events. Subscribing to the statuses of all panes is
+not possible: `pane.agent_status_changed` requires a `pane_id`.
 
-Поэтому `-poll 3s` (по умолчанию). События дают быструю реакцию на структурные
-изменения, опрос страхует всё остальное. `-poll 0` оставляет только события.
+Hence `-poll 3s` (the default). Events give a fast reaction to structural
+changes, polling covers everything else. `-poll 0` leaves events only.
 
-## Сборка и запуск
+## Build and run
 
-```fish
-cd ~/projects/herdrtabrenamer
-nix-shell -p go --run 'go build -o herdrtabrenamer .'
+```sh
+git clone https://github.com/AlexBSoD/herdrtabrenamer
+cd herdrtabrenamer
+go build -o herdrtabrenamer .
 
-# посмотреть, что получится, ничего не меняя
+# see what it would do, changing nothing
 ./herdrtabrenamer -once
 
-# следить и переименовывать
+# watch and rename
 ./herdrtabrenamer -apply
 ```
 
-Без `-apply` программа ничего не меняет — только печатает планируемые имена.
+On Nix:
 
-Остановка:
+```sh
+nix run github:AlexBSoD/herdrtabrenamer -- -once
+```
 
-```fish
+Without `-apply` the program changes nothing — it only prints the names it
+would set.
+
+Stopping it:
+
+```sh
 pkill -x herdrtabrenamer
 ```
 
-Именно `-x`, по имени процесса. `pkill -f 'herdrtabrenamer -apply'` совпадает с
-командной строкой собственной оболочки и убивает её вместе с демоном.
+Note the `-x`, matching the process name. `pkill -f 'herdrtabrenamer -apply'`
+also matches the command line of your own shell and kills it along with the
+daemon.
 
-## Флаги
+## Flags
 
-| Флаг | По умолчанию | Что делает |
+| Flag | Default | What it does |
 |---|---|---|
-| `-format` | `{proc\|dir}` | шаблон имени |
-| `-apply` | выкл | реально переименовывать |
-| `-once` | выкл | один проход и выход |
-| `-force` | выкл | перезаписывать и вручную заданные имена |
-| `-poll` | `3s` | период опроса состояния, `0` — только события |
-| `-max-len` | 24 | обрезка по символам (0 — без ограничения) |
-| `-debounce` | `400ms` | склейка потока событий |
-| `-workspace` | все | ограничиться одним `workspace_id` |
-| `-state` | `$XDG_STATE_HOME/herdrtabrenamer/labels.json` | файл с нашими метками, пусто — не запоминать |
-| `-icons` | — | эмодзи статусов, если они используются в шаблоне |
-| `-socket` | `$XDG_CONFIG_HOME/herdr/herdr.sock` | путь до сокета |
+| `-format` | `{proc\|dir}` | the name template |
+| `-apply` | off | actually rename |
+| `-once` | off | one pass and exit |
+| `-force` | off | overwrite human-made names too |
+| `-poll` | `3s` | state polling interval, `0` means events only |
+| `-max-len` | 24 | truncation in characters (0 means unlimited) |
+| `-debounce` | `400ms` | coalescing of the event stream |
+| `-workspace` | all | restrict to a single `workspace_id` |
+| `-state` | `$XDG_STATE_HOME/herdrtabrenamer/labels.json` | file with our own labels, empty means do not remember |
+| `-icons` | — | status emoji, if the template uses them |
+| `-socket` | `$XDG_CONFIG_HOME/herdr/herdr.sock` | path to the socket |
 
-## Шаблоны
+## Templates
 
-Токены: `{proc}` `{dir}` `{agent}` `{cwd}` `{title}` `{icon}` `{status}`
+Tokens: `{proc}` `{dir}` `{agent}` `{cwd}` `{title}` `{icon}` `{status}`
 `{number}`.
 
-Альтернативы через `|` берут первое непустое значение. Разделители между
-токенами исчезают вместе с пустым токеном, поэтому `{agent}:{dir}` без
-определённого агента даёт `nixos`, а не `:nixos`.
+Alternatives separated by `|` take the first non-empty value. Separators
+between tokens disappear together with an empty token, so `{agent}:{dir}`
+without a detected agent renders `nixos`, not `:nixos`.
 
 ```
-{proc|dir}                 btop, nixos, rmk               (по умолчанию)
+{proc|dir}                 btop, nixos, rmk               (the default)
 {proc|agent}:{dir}         btop:rmk, claude:nixos, rmk
 {number}:{dir}             36:nixos
-{title}                    Найти альтернативу bge-m3 для Open…
+{title}                    Find an alternative to bge-m3 for Open…
 {icon} {proc|dir}          🟡 nixos
 ```
 
-`{title}` — это `terminal_title_stripped` из OSC 0/2, то есть у Claude Code и pi
-там осмысленная строка про текущую задачу.
+`{title}` is `terminal_title_stripped` from OSC 0/2, which for Claude Code and
+pi holds a meaningful line about the current task.
 
-### Имя запущенной программы
+### The name of the running program
 
-`{proc}` — foreground-процесс ведущей панели, полученный через
-`pane.process_info`. Правила:
+`{proc}` is the foreground process of the lead pane, obtained via
+`pane.process_info`. The rules:
 
-- шеллы (`fish`, `bash`, `zsh`, `sh`, …) считаются отсутствием процесса, иначе
-  все табы звались бы `fish`
-- у панели с определённым агентом `{proc}` пуст: имя агента точнее, а в его
-  foreground-группе висят ещё и MCP-серверы
-- имя берётся из `cmdline`, а не из `name` — на NixOS запущенный `claude`
-  выглядит как `name=".claude-wrapped"`; обёртки `-wrapped` / `-wrap` и ведущая
-  точка срезаются
-- из группы выбирается процесс с `pid == foreground_process_group_id`, а не
-  первый в списке
+- shells (`fish`, `bash`, `zsh`, `sh`, …) count as no process at all, otherwise
+  every tab would be called `fish`
+- for a pane with a detected agent `{proc}` is empty: the agent name is more
+  precise, and its foreground group also holds MCP servers
+- the name comes from `cmdline`, not from `name` — on NixOS a running `claude`
+  shows up as `name=".claude-wrapped"`; the `-wrapped` / `-wrap` wrappers and a
+  leading dot are stripped
+- from the group we pick the process with `pid == foreground_process_group_id`,
+  not the first one in the list
 
-Имя таба берётся с «ведущей» панели: сначала панель с определённым агентом,
-затем сфокусированная, затем первая по `pane_id`.
+The tab name is taken from the "lead" pane: first a pane with a detected agent,
+then the focused one, then the lowest `pane_id`.
 
-## Ручные имена не затираются
+## Human-made names are not overwritten
 
-Если метка таба не похожа ни на автогенерированную (просто число), ни на нашу
-работу, таб помечается как названный человеком и больше не трогается. Флаг
-`-force` отключает защиту.
+If a tab label looks neither auto-generated (a bare number) nor like our own
+work, the tab is marked as named by a human and never touched again. The
+`-force` flag disables the protection.
 
-«Нашу работу» демон узнаёт двумя способами:
+The daemon recognizes "our own work" in two ways:
 
-1. **Файл состояния** — метки, которые он поставил, лежат в
-   `~/.local/state/herdrtabrenamer/labels.json`. Запись атомарная (`.tmp` +
-   rename), битый или отсутствующий файл не ошибка. Записи закрытых табов
-   подчищаются при полном обходе.
-2. **Перебор вариантов** — рендерит шаблон при других статусах, с процессом и
-   без, с агентом и без. Это покрывает случаи, когда состояние ещё не записано.
+1. **A state file** — the labels it set are kept in
+   `~/.local/state/herdrtabrenamer/labels.json`. The write is atomic (`.tmp` +
+   rename); a corrupt or missing file is not an error. Entries of closed tabs
+   are pruned during a full pass.
+2. **Trying the variants** — it renders the template for other statuses, with
+   and without a process, with and without an agent. That covers the cases
+   where the state has not been written yet.
 
-Без файла состояния всё ломалось на ровном месте: таб звался `btop`, программа
-завершилась, ожидаемое имя стало `rmk` — и прежнее имя выглядело чужим, потому
-что имя уже завершившейся программы перебором не угадать.
+Without the state file things broke out of nowhere: a tab was named `btop`, the
+program exited, the expected name became `rmk` — and the previous name looked
+foreign, because the name of an already finished program cannot be guessed by
+enumeration.
 
-При смене набора иконок или шаблона старые имена тоже могут не опознаться —
-тогда нужен один прогон с `-force`:
+When the icon set or the template changes, old names may fail to be recognized
+too — then a single run with `-force` is needed:
 
-```fish
+```sh
 ./herdrtabrenamer -apply -force -once -format "{proc|agent}:{dir}"
 ./herdrtabrenamer -apply -format "{proc|agent}:{dir}"
 ```
 
-## Статусы агентов эмодзи (опционально)
+## Agent statuses as emoji (optional)
 
-Задать цвет таба нечем: в socket API нет ни цветов, ни стилей (`tab.rename`
-принимает только текст), а в `config.toml` единственная опция таб-бара —
-`ui.tab_bar_position`. Inline-стили `{ token, fg, bold, dim }` существуют только
-для `ui.sidebar.agents.rows`, то есть в сайдбаре и статически.
+There is nothing to set a tab colour with: the socket API has neither colours
+nor styles (`tab.rename` only takes text), and in `config.toml` the only tab bar
+option is `ui.tab_bar_position`. The inline styles `{ token, fg, bold, dim }`
+exist solely for `ui.sidebar.agents.rows`, that is, in the sidebar and
+statically.
 
-Единственный способ получить цветное пятно в таб-баре — эмодзи, они несут свой
-цвет:
+The only way to get a coloured dot in the tab bar is an emoji — they carry
+their own colour:
 
-```fish
+```sh
 ./herdrtabrenamer -apply -format "{icon} {proc|dir}" \
   -icons "blocked=🟥,working=🟨,done=🟩,idle=⬜"
 ```
 
-По умолчанию: 🔴 `blocked`, 🟡 `working`, 🟢 `done`, ⚪ `idle`, `unknown` — пусто.
-Пустая иконка исчезает вместе с разделителем.
+The defaults: 🔴 `blocked`, 🟡 `working`, 🟢 `done`, ⚪ `idle`, `unknown` — none.
+An empty icon disappears together with its separator.
 
-Не бери эмодзи с variation selector (`⏸️ ▶️ ⚠️ ❗`, внутри U+FE0F) — их ширина
-зависит от терминала, и таб-бар дёргается при смене статуса. Однобайтовые
-`● ◐ ○ ◆` занимают одну колонку, но своего цвета не имеют.
+Do not pick emoji with a variation selector (`⏸️ ▶️ ⚠️ ❗`, containing U+FE0F) —
+their width depends on the terminal, and the tab bar jitters on every status
+change. The single-width `● ◐ ○ ◆` take one column but carry no colour of their
+own.
 
-`-max-len` считает символы, а не колонки: эмодзи шириной в две колонки при
-лимите 24 фактически займёт 25.
+`-max-len` counts characters, not columns: a double-width emoji at a limit of
+24 will actually occupy 25.
 
-## Особенности socket API, на которые ушло время
+## Socket API quirks worth knowing
 
-- **Один запрос на соединение.** Сервер отвечает и сразу закрывает сокет; второй
-  `write` в то же соединение даёт `broken pipe`. Поэтому каждый вызов открывает
-  своё соединение, а персистентным остаётся только поток подписки.
-- **`params` обязателен**, даже пустой: без него приходит
+- **One request per connection.** The server answers and closes the socket right
+  away; a second `write` into the same connection yields a `broken pipe`. So
+  every call opens its own connection, and the only long-lived one is the
+  subscription stream.
+- **`params` is mandatory**, even when empty: without it you get
   `invalid_request: missing field 'params'`.
-- **Подписки называются через точку** (`pane.updated`), а `data.type` внутри
-  события — через подчёркивание (`pane_updated`).
-- **`pane.agent_status_changed` требует `pane_id`**, то есть подписаться на
-  статусы всех панелей сразу нельзя.
-- **События приходят далеко не на всё** — см. раздел про опрос выше.
-- Полная схема: `herdr api schema --json` (protocol 17, ~250 КБ, 89 методов).
+- **Subscriptions are named with dots** (`pane.updated`), while `data.type`
+  inside an event uses underscores (`pane_updated`).
+- **`pane.agent_status_changed` requires a `pane_id`**, so subscribing to the
+  statuses of all panes at once is impossible.
+- **Events are far from covering everything** — see the polling section above.
+- The full schema: `herdr api schema --json` (protocol 17, ~250 KB, 89 methods).
 
-## Что дальше
+## Status
 
-Прототип живёт отдельно от `services.qubeherd`, который уже слушает тот же
-сокет. Если поведение устроит — логику стоит перенести туда, а не держать второй
-демон на одном API.
+Verified against herdr 0.7.5 (protocol 17) and 0.8.0 (protocol 19).
+
+## License
+
+MIT, see [LICENSE](LICENSE).

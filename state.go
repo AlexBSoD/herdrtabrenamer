@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 )
 
-// Состояние — то, какие метки демон поставил сам. Без него любое осмысленное
-// имя после перезапуска выглядит как заданное человеком: эвристика looksOurs
-// умеет варьировать статус и наличие процесса, но не может угадать имя
-// программы, которая уже завершилась. Пример: таб звался "btop", пользователь
-// вышел из btop — вернуть его к "rmk" можно только зная, что "btop" наше.
+// State is the record of which labels the daemon set itself. Without it every
+// meaningful name looks human-made after a restart: the looksOurs heuristic can
+// vary the status and the presence of a process, but it cannot guess the name
+// of a program that has already exited. Example: a tab was named "btop", the
+// user quit btop — restoring it to "rmk" is only possible while knowing that
+// "btop" was ours.
 
 type state struct {
 	path   string
@@ -33,8 +34,8 @@ func StatePath() string {
 	return filepath.Join(base, "herdrtabrenamer", "labels.json")
 }
 
-// LoadState читает состояние. Отсутствующий или битый файл — не ошибка:
-// начинаем с чистого листа, потеряв только знание о своих прошлых метках.
+// LoadState reads the state. A missing or corrupt file is not an error: we
+// start from scratch, losing only the knowledge of our previous labels.
 func LoadState(path string) *state {
 	s := &state{path: path, Labels: map[string]string{}}
 	if path == "" {
@@ -54,8 +55,8 @@ func LoadState(path string) *state {
 	return s
 }
 
-// Save пишет состояние атомарно: сначала во временный файл рядом, затем
-// rename — оборванная запись не оставит битый JSON.
+// Save writes the state atomically: first into a temporary file next to it,
+// then rename — an interrupted write leaves no broken JSON behind.
 func (s *state) Save() error {
 	if s.path == "" {
 		return nil
@@ -73,13 +74,13 @@ func (s *state) Save() error {
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
 		os.Remove(tmp)
-		return fmt.Errorf("подмена %s: %w", s.path, err)
+		return fmt.Errorf("replacing %s: %w", s.path, err)
 	}
 	return nil
 }
 
-// Prune выбрасывает записи табов, которых больше нет, чтобы файл не пух.
-// Возвращает true, если что-то удалено.
+// Prune drops entries for tabs that no longer exist, so the file does not grow
+// forever. Returns true when something was removed.
 func (s *state) Prune(alive map[string]bool) bool {
 	removed := false
 	for tabID := range s.Labels {

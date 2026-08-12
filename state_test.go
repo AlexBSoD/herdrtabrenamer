@@ -11,42 +11,42 @@ func TestStateRoundTrip(t *testing.T) {
 
 	s := LoadState(path)
 	if len(s.Labels) != 0 {
-		t.Fatalf("отсутствующий файл должен давать пустое состояние, получено %v", s.Labels)
+		t.Fatalf("a missing file should yield an empty state, got %v", s.Labels)
 	}
 
 	s.Labels["w4:t1F"] = "btop"
 	s.Labels["w4:t14"] = "nixos"
 	if err := s.Save(); err != nil {
-		t.Fatalf("сохранение не удалось: %v", err)
+		t.Fatalf("save failed: %v", err)
 	}
 
-	// Каталог должен создаться сам, временный файл — не остаться.
+	// The directory must be created on its own and the temp file must not remain.
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Error("временный файл остался после Save")
+		t.Error("the temporary file survived Save")
 	}
 
 	loaded := LoadState(path)
 	if loaded.Labels["w4:t1F"] != "btop" || loaded.Labels["w4:t14"] != "nixos" {
-		t.Errorf("состояние не восстановилось: %v", loaded.Labels)
+		t.Errorf("state was not restored: %v", loaded.Labels)
 	}
 }
 
 func TestLoadStateToleratesGarbage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "labels.json")
-	if err := os.WriteFile(path, []byte("{это не json"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("{this is not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	s := LoadState(path)
 	if s.Labels == nil || len(s.Labels) != 0 {
-		t.Errorf("битый файл должен давать пустое состояние, получено %v", s.Labels)
+		t.Errorf("a corrupt file should yield an empty state, got %v", s.Labels)
 	}
-	// И запись поверх мусора обязана работать.
+	// And writing over the garbage has to work.
 	s.Labels["w1:t1"] = "x"
 	if err := s.Save(); err != nil {
-		t.Fatalf("перезапись битого файла не удалась: %v", err)
+		t.Fatalf("overwriting a corrupt file failed: %v", err)
 	}
 	if got := LoadState(path).Labels["w1:t1"]; got != "x" {
-		t.Errorf("получено %q", got)
+		t.Errorf("got %q", got)
 	}
 }
 
@@ -58,13 +58,13 @@ func TestStatePrune(t *testing.T) {
 	}}
 
 	if !s.Prune(map[string]bool{"w4:t1": true, "w4:t3": true}) {
-		t.Error("Prune должен сообщить об удалении")
+		t.Error("Prune should report the removal")
 	}
 	if len(s.Labels) != 2 || s.Labels["w4:t2"] != "" {
-		t.Errorf("остались лишние записи: %v", s.Labels)
+		t.Errorf("stale entries remain: %v", s.Labels)
 	}
 	if s.Prune(map[string]bool{"w4:t1": true, "w4:t3": true}) {
-		t.Error("повторный Prune не должен ничего удалять")
+		t.Error("a repeated Prune should remove nothing")
 	}
 }
 
@@ -72,6 +72,6 @@ func TestStateWithoutPathIsNoop(t *testing.T) {
 	s := LoadState("")
 	s.Labels["w1:t1"] = "x"
 	if err := s.Save(); err != nil {
-		t.Errorf("пустой путь должен молча ничего не делать, получено %v", err)
+		t.Errorf("an empty path should silently do nothing, got %v", err)
 	}
 }

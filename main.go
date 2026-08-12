@@ -14,10 +14,10 @@ import (
 	"time"
 )
 
-// События, на которые подписываемся. Все они несут workspace_id, поэтому
-// достаточно знать, какое рабочее пространство «поехало», и перезапросить его
-// состояние целиком — payload'ы событий частичные (pane_agent_detected, к
-// примеру, отдаёт только pane_id и agent, без cwd и заголовка).
+// The events we subscribe to. All of them carry a workspace_id, so it is enough
+// to know which workspace moved and re-query its state as a whole — event
+// payloads are partial (pane_agent_detected, for one, only returns pane_id and
+// agent, without cwd or the title).
 var defaultSubscriptions = []string{
 	"tab.created",
 	"tab.closed",
@@ -30,7 +30,7 @@ var defaultSubscriptions = []string{
 	"pane.agent_detected",
 }
 
-// Общий вид payload события: берём только маршрутизирующие поля.
+// The common shape of an event payload: we only take the routing fields.
 type eventRoute struct {
 	Type        string `json:"type"`
 	WorkspaceID string `json:"workspace_id"`
@@ -62,70 +62,70 @@ type renamer struct {
 	force    bool
 	maxLen   int
 	debounce time.Duration
-	only     string // фильтр по workspace_id, пусто = все
+	only     string // workspace_id filter, empty means all
 
-	// refreshMu сериализует обходы: опрос по таймеру и обход по событию иначе
-	// могут пересечься и дважды переименовать один таб.
+	// refreshMu serializes the passes: the timer poll and an event-driven pass
+	// would otherwise overlap and rename the same tab twice.
 	refreshMu sync.Mutex
 
 	mu       sync.Mutex
-	state    *state            // наши метки, переживает перезапуск
-	dryShown map[string]string // tab_id -> что уже показали в dry-run
-	manual   map[string]bool   // tab_id -> имя задано человеком, не трогаем
+	state    *state            // our labels, survives a restart
+	dryShown map[string]string // tab_id -> what we already printed in dry-run
+	manual   map[string]bool   // tab_id -> the name is human-made, do not touch
 	timers   map[string]*time.Timer
 }
 
 func main() {
-	sock := flag.String("socket", SocketPath(), "путь до сокета herdr-сервера")
+	sock := flag.String("socket", SocketPath(), "path to the herdr server socket")
 	format := flag.String("format", "{proc|dir}",
-		"шаблон имени таба; токены {proc} {dir} {agent} {cwd} {title} {icon} {status} {number}, "+
-			"альтернативы через | берут первое непустое")
+		"tab name template; tokens {proc} {dir} {agent} {cwd} {title} {icon} {status} {number}, "+
+			"alternatives separated by | take the first non-empty one")
 	icons := flag.String("icons", "",
-		"переопределение эмодзи статуса, например \"working=⚡,idle=\" (статусы: blocked working done idle unknown)")
-	apply := flag.Bool("apply", false, "реально переименовывать (без флага — только показывать)")
-	force := flag.Bool("force", false, "перезаписывать и вручную заданные имена")
-	once := flag.Bool("once", false, "один проход по текущим табам и выход")
-	maxLen := flag.Int("max-len", 24, "максимальная длина имени в символах, 0 — без ограничения")
-	debounce := flag.Duration("debounce", 400*time.Millisecond, "задержка склейки событий")
+		"override the status emoji, e.g. \"working=⚡,idle=\" (statuses: blocked working done idle unknown)")
+	apply := flag.Bool("apply", false, "actually rename (without this flag it only prints)")
+	force := flag.Bool("force", false, "overwrite human-made names as well")
+	once := flag.Bool("once", false, "make a single pass over the current tabs and exit")
+	maxLen := flag.Int("max-len", 24, "maximum name length in characters, 0 means unlimited")
+	debounce := flag.Duration("debounce", 400*time.Millisecond, "how long to coalesce a burst of events")
 	poll := flag.Duration("poll", 3*time.Second,
-		"период опроса состояния; 0 — только события. Нужен потому, что herdr не "+
-			"присылает событий на часть изменений (например смену agent_status)")
-	workspace := flag.String("workspace", "", "ограничиться одним workspace_id")
+		"state polling interval; 0 means events only. Needed because herdr does not "+
+			"emit events for some changes (an agent_status change, for instance)")
+	workspace := flag.String("workspace", "", "restrict to a single workspace_id")
 	statePath := flag.String("state", StatePath(),
-		"файл с метками, которые поставил демон; пусто — не запоминать между запусками")
+		"file holding the labels the daemon set; empty means do not remember across runs")
 	flag.Parse()
 
 	if *sock == "" {
-		log.Fatal("не удалось определить путь до сокета, укажите -socket")
+		log.Fatal("cannot determine the socket path, pass -socket")
 	}
 
 	log.SetFlags(log.Ltime)
-	mode := "DRY-RUN (ничего не меняется)"
+	mode := "DRY-RUN (nothing is changed)"
 	if *apply {
-		mode = "APPLY (табы будут переименованы)"
+		mode = "APPLY (tabs will be renamed)"
 	}
 	log.Printf("herdrtabrenamer: %s", mode)
-	log.Printf("сокет: %s", *sock)
+	log.Printf("socket: %s", *sock)
 
 	iconMap, err := ParseIcons(*icons)
 	if err != nil {
-		log.Fatalf("флаг -icons: %v", err)
+		log.Fatalf("-icons flag: %v", err)
 	}
-	log.Printf("шаблон: %q, max-len=%d, debounce=%s, poll=%s", *format, *maxLen, *debounce, *poll)
+	log.Printf("template: %q, max-len=%d, debounce=%s, poll=%s", *format, *maxLen, *debounce, *poll)
 	if strings.Contains(*format, "{icon}") || strings.Contains(*format, "{status}") {
-		log.Printf("иконки: blocked=%q working=%q done=%q idle=%q unknown=%q",
+		log.Printf("icons: blocked=%q working=%q done=%q idle=%q unknown=%q",
 			iconMap["blocked"], iconMap["working"], iconMap["done"], iconMap["idle"], iconMap["unknown"])
 	}
 
 	cli, err := Dial(*sock)
 	if err != nil {
-		log.Fatalf("herdr недоступен: %v (сервер запущен? `herdr status`)", err)
+		log.Fatalf("herdr is unreachable: %v (is the server running? `herdr status`)", err)
 	}
 	defer cli.Close()
 
 	st := LoadState(*statePath)
 	if len(st.Labels) > 0 {
-		log.Printf("состояние: %d меток из %s", len(st.Labels), *statePath)
+		log.Printf("state: %d labels from %s", len(st.Labels), *statePath)
 	}
 
 	r := &renamer{
@@ -148,24 +148,25 @@ func main() {
 
 	if *once {
 		if err := r.sweep(); err != nil {
-			log.Fatalf("первый проход не удался: %v", err)
+			log.Fatalf("the first pass failed: %v", err)
 		}
 		return
 	}
-	// В режиме наблюдения первый проход делает watch сразу после подписки —
-	// иначе события, случившиеся между проходом и подпиской, потерялись бы.
+	// In watch mode the first pass is made by watch right after subscribing —
+	// otherwise events happening between the pass and the subscription would be
+	// lost.
 
 	if *poll > 0 {
 		go r.pollLoop(ctx, *poll)
 	}
-	log.Printf("подписка на события: %v", defaultSubscriptions)
+	log.Printf("subscribing to events: %v", defaultSubscriptions)
 	if err := r.watch(ctx, *sock); err != nil && ctx.Err() == nil {
-		log.Fatalf("поток событий оборвался: %v", err)
+		log.Fatalf("the event stream broke: %v", err)
 	}
-	log.Print("остановлено")
+	log.Print("stopped")
 }
 
-// sweep пересчитывает имена всех табов во всех (или в заданном) workspace.
+// sweep recomputes the names of every tab in all workspaces (or in the given one).
 func (r *renamer) sweep() error {
 	tabs, err := r.cli.ListTabs(r.only)
 	if err != nil {
@@ -191,14 +192,14 @@ func (r *renamer) sweep() error {
 		}
 	}
 
-	// Метки закрытых табов больше не нужны. Чистим только при обходе всех
-	// workspace: при -workspace список табов заведомо неполный.
+	// Labels of closed tabs are no longer needed. We only prune during a full
+	// pass: with -workspace the tab list is knowingly incomplete.
 	if r.only == "" && r.apply {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		if r.state.Prune(alive) {
 			if err := r.state.Save(); err != nil {
-				log.Printf("состояние не сохранено: %v", err)
+				log.Printf("state not saved: %v", err)
 			}
 		}
 		for tabID := range r.manual {
@@ -210,8 +211,8 @@ func (r *renamer) sweep() error {
 	return nil
 }
 
-// refresh перезапрашивает табы и панели одного workspace и приводит имена
-// в соответствие шаблону.
+// refresh re-queries the tabs and panes of a single workspace and brings the
+// names in line with the template.
 func (r *renamer) refresh(workspace string) error {
 	r.refreshMu.Lock()
 	defer r.refreshMu.Unlock()
@@ -236,14 +237,14 @@ func (r *renamer) refresh(workspace string) error {
 			continue
 		}
 		panes := byTab[t.TabID]
-		// Имя процесса спрашиваем только для ведущей панели и только когда
-		// агент не определён: у агентской панели в foreground-группе висят
-		// ещё и её MCP-серверы, а само имя агента уже известно.
+		// We ask for the process name only for the lead pane and only when no
+		// agent was detected: an agent's foreground group also holds its MCP
+		// servers, and the agent name itself is already known.
 		proc := ""
 		if lead := leadPane(panes); lead != nil && lead.Agent == "" {
 			info, err := r.cli.ProcessInfo(lead.PaneID)
 			if err != nil {
-				log.Printf("%s: process_info не получен: %v", lead.PaneID, err)
+				log.Printf("%s: process_info failed: %v", lead.PaneID, err)
 			} else {
 				proc = ProcName(info)
 			}
@@ -253,7 +254,7 @@ func (r *renamer) refresh(workspace string) error {
 	return nil
 }
 
-// reconcile решает судьбу одного таба.
+// reconcile decides the fate of a single tab.
 func (r *renamer) reconcile(tab tabInfo, panes []paneInfo, proc string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -266,12 +267,12 @@ func (r *renamer) reconcile(tab tabInfo, panes []paneInfo, proc string) {
 	ctx := contextFor(tab, lead, proc, r.icons)
 	desired := Truncate(r.tmpl.Render(ctx), r.maxLen)
 
-	// Имя, которое не похоже ни на автогенерированное, ни на нашу работу,
-	// задал человек. Уважаем и больше к этому табу не возвращаемся.
+	// A name that looks neither auto-generated nor like our own work was set by
+	// a human. Respect it and never come back to this tab.
 	if !r.force && !IsGeneratedLabel(tab.Label) &&
 		tab.Label != r.state.Labels[tab.TabID] && !r.looksOurs(ctx, tab.Label) {
 		r.manual[tab.TabID] = true
-		log.Printf("%s: имя %q задано вручную — пропускаю", tab.TabID, tab.Label)
+		log.Printf("%s: the name %q is human-made — skipping", tab.TabID, tab.Label)
 		return
 	}
 
@@ -280,7 +281,7 @@ func (r *renamer) reconcile(tab tabInfo, panes []paneInfo, proc string) {
 	}
 
 	if !r.apply {
-		// Событий много, а имя меняется редко — печатаем только новое.
+		// Events are many while the name changes rarely — print only new ones.
 		if r.dryShown[tab.TabID] != desired {
 			r.dryShown[tab.TabID] = desired
 			log.Printf("[dry-run] %s: %q -> %q%s", tab.TabID, tab.Label, desired, describeLead(lead))
@@ -288,26 +289,26 @@ func (r *renamer) reconcile(tab tabInfo, panes []paneInfo, proc string) {
 		return
 	}
 	if err := r.cli.RenameTab(tab.TabID, desired); err != nil {
-		log.Printf("%s: переименование не удалось: %v", tab.TabID, err)
+		log.Printf("%s: rename failed: %v", tab.TabID, err)
 		return
 	}
 	r.state.Labels[tab.TabID] = desired
 	if err := r.state.Save(); err != nil {
-		log.Printf("состояние не сохранено: %v", err)
+		log.Printf("state not saved: %v", err)
 	}
 	log.Printf("%s: %q -> %q%s", tab.TabID, tab.Label, desired, describeLead(lead))
 }
 
-// looksOurs проверяет, не мы ли поставили это имя раньше — при другом
-// состоянии таба. Без этой проверки перезапуск демона выглядел бы так: видим
-// своё же "🟡 claude:nixos", в памяти пусто, значит «ручное» — и таб замирает
-// навсегда.
+// looksOurs checks whether we set this name ourselves earlier, in a different
+// tab state. Without this check a daemon restart would look like this: we see
+// our own "🟡 claude:nixos", the memory is empty, so it must be "human-made" —
+// and the tab freezes forever.
 //
-// Варьируем всё, что меняется само по себе, пока имя остаётся нашим:
-// статус (а с ним иконку), наличие запущенного процесса и наличие агента.
-// Пример из практики: таб звался "rmk" (в панели был только шелл), потом
-// пользователь запустил btop — и без варианта с пустым {proc} прежнее имя
-// выглядело бы чужим.
+// We vary everything that changes on its own while the name stays ours: the
+// status (and with it the icon), the presence of a running process and the
+// presence of an agent. A case from practice: a tab was named "rmk" (only a
+// shell in the pane), then the user started btop — and without the variant
+// where {proc} is empty, the previous name would have looked foreign.
 func (r *renamer) looksOurs(ctx NameContext, label string) bool {
 	procs := []string{ctx.Proc}
 	if ctx.Proc != "" {
@@ -337,7 +338,7 @@ func (r *renamer) looksOurs(ctx NameContext, label string) bool {
 
 func describeLead(p *paneInfo) string {
 	if p == nil {
-		return " (панелей нет)"
+		return " (no panes)"
 	}
 	agent := p.DisplayAgent
 	if agent == "" {
@@ -353,11 +354,11 @@ func describeLead(p *paneInfo) string {
 	return fmt.Sprintf(" [pane=%s agent=%s status=%s cwd=%s]", p.PaneID, agent, p.AgentStatus, cwd)
 }
 
-// pollLoop периодически сверяет состояние. Событий на всё не хватает: herdr не
-// присылает pane.updated при смене agent_status, а подписка
-// pane.agent_status_changed требует pane_id, то есть на «все панели» подписаться
-// нельзя. Измерено: демон с одной подпиской прожил 75 минут и получил 3 события,
-// хотя состояние менялось десятки раз.
+// pollLoop periodically reconciles the state. Events do not cover everything:
+// herdr sends no pane.updated on an agent_status change, and the
+// pane.agent_status_changed subscription requires a pane_id, so subscribing to
+// "all panes" is impossible. Measured: a daemon with only a subscription lived
+// for 75 minutes and received 3 events, while the state changed dozens of times.
 func (r *renamer) pollLoop(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -367,20 +368,20 @@ func (r *renamer) pollLoop(ctx context.Context, every time.Duration) {
 			return
 		case <-ticker.C:
 			if err := r.sweep(); err != nil && ctx.Err() == nil {
-				log.Printf("опрос не удался: %v", err)
+				log.Printf("poll failed: %v", err)
 			}
 		}
 	}
 }
 
-// watch держит подписку и переподключается, если сервер её оборвал
-// (перезапуск herdr, live handoff при обновлении).
+// watch holds the subscription and reconnects when the server drops it
+// (a herdr restart, a live handoff during an update).
 func (r *renamer) watch(ctx context.Context, sock string) error {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		stream, err := Subscribe(sock, defaultSubscriptions)
 		if err != nil {
-			log.Printf("подписка не удалась (%v), повтор через %s", err, backoff)
+			log.Printf("subscription failed (%v), retrying in %s", err, backoff)
 			if !sleepCtx(ctx, backoff) {
 				return ctx.Err()
 			}
@@ -389,9 +390,10 @@ func (r *renamer) watch(ctx context.Context, sock string) error {
 		}
 		backoff = time.Second
 
-		// После (пере)подключения состояние могло уехать — сверяем всё.
+		// The state may have drifted while we were (re)connecting — reconcile
+		// everything.
 		if err := r.sweep(); err != nil {
-			log.Printf("сверка после подписки не удалась: %v", err)
+			log.Printf("post-subscription reconcile failed: %v", err)
 		}
 
 		err = r.consume(ctx, stream)
@@ -399,14 +401,14 @@ func (r *renamer) watch(ctx context.Context, sock string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		log.Printf("поток событий закрыт (%v), переподключаюсь", err)
+		log.Printf("event stream closed (%v), reconnecting", err)
 	}
 	return ctx.Err()
 }
 
 func (r *renamer) consume(ctx context.Context, stream *EventStream) error {
-	// Чтение блокирующее, поэтому закрываем сокет по отмене контекста —
-	// Next() вернёт ошибку и горутина выйдет.
+	// Reading blocks, so we close the socket when the context is cancelled —
+	// Next() then returns an error and the goroutine exits.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -434,8 +436,8 @@ func (r *renamer) consume(ctx context.Context, stream *EventStream) error {
 	}
 }
 
-// schedule склеивает поток событий: pane.updated прилетает пачками, а
-// перезапрашивать состояние на каждое — лишняя работа.
+// schedule coalesces the event stream: pane.updated arrives in bursts, and
+// re-querying the state for each one is wasted work.
 func (r *renamer) schedule(workspace string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -446,7 +448,7 @@ func (r *renamer) schedule(workspace string) {
 	}
 	r.timers[workspace] = time.AfterFunc(r.debounce, func() {
 		if err := r.refresh(workspace); err != nil {
-			log.Printf("%s: обновление не удалось: %v", workspace, err)
+			log.Printf("%s: refresh failed: %v", workspace, err)
 		}
 	})
 }

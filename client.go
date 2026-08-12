@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// SocketPath возвращает путь до сокета herdr-сервера.
-// herdr держит его рядом с config.toml, см. `herdr --help` (раздел Config).
+// SocketPath returns the path of the herdr server socket.
+// herdr keeps it next to config.toml, see `herdr --help` (Config section).
 func SocketPath() string {
 	if p := os.Getenv("HERDR_SOCKET"); p != "" {
 		return p
@@ -28,23 +28,24 @@ func SocketPath() string {
 	return filepath.Join(base, "herdr", "herdr.sock")
 }
 
-// Client выполняет запросы к socket API.
+// Client performs socket API requests.
 //
-// ВАЖНО: сервер обрабатывает РОВНО ОДИН запрос на соединение и сразу его
-// закрывает — второй Write в тот же сокет даёт broken pipe. Проверено на
-// herdr 0.7.5 / protocol 17. Поэтому каждый Call открывает своё соединение;
-// персистентным остаётся только поток подписки (EventStream).
+// IMPORTANT: the server handles EXACTLY ONE request per connection and closes
+// it right after; a second write into the same socket yields a broken pipe.
+// Verified on herdr 0.7.5 (protocol 17) and still true on 0.8.0 (protocol 19).
+// So every Call opens its own connection; the only long-lived connection is the
+// event subscription (EventStream).
 type Client struct {
 	sock string
 	seq  atomic.Uint64
 }
 
 func Dial(sock string) (*Client, error) {
-	// Пробное соединение, чтобы сразу отличить «сервер не запущен» от ошибок
-	// в самих запросах.
+	// A probe connection, so that "server is not running" is distinguishable
+	// from errors in the requests themselves.
 	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("подключение к %s: %w", sock, err)
+		return nil, fmt.Errorf("connecting to %s: %w", sock, err)
 	}
 	conn.Close()
 	return &Client{sock: sock}, nil
@@ -64,7 +65,7 @@ func (c *Client) Call(method string, params any) (json.RawMessage, error) {
 
 	conn, err := net.DialTimeout("unix", c.sock, 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("подключение к %s: %w", c.sock, err)
+		return nil, fmt.Errorf("connecting to %s: %w", c.sock, err)
 	}
 	defer conn.Close()
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
@@ -72,17 +73,17 @@ func (c *Client) Call(method string, params any) (json.RawMessage, error) {
 	}
 
 	if _, err := conn.Write(append(payload, '\n')); err != nil {
-		return nil, fmt.Errorf("запись %s: %w", method, err)
+		return nil, fmt.Errorf("writing %s: %w", method, err)
 	}
 
 	r := bufio.NewReaderSize(conn, 1<<20)
 	line, err := r.ReadBytes('\n')
 	if err != nil {
-		return nil, fmt.Errorf("чтение ответа %s: %w", method, err)
+		return nil, fmt.Errorf("reading %s response: %w", method, err)
 	}
 	var resp response
 	if err := json.Unmarshal(line, &resp); err != nil {
-		return nil, fmt.Errorf("ответ %s не разобран: %w", method, err)
+		return nil, fmt.Errorf("cannot parse %s response: %w", method, err)
 	}
 	if resp.Error != nil {
 		return nil, fmt.Errorf("%s: %w", method, resp.Error)
@@ -139,8 +140,9 @@ func (c *Client) RenameTab(tabID, label string) error {
 	return err
 }
 
-// EventStream — отдельное соединение под подписку. Смешивать его с запросами
-// нельзя: события приходят без id и сбивают синхронный request/response.
+// EventStream is a dedicated connection for the subscription. Mixing it with
+// requests is not possible: events arrive without an id and would desynchronize
+// the request/response pairing.
 type EventStream struct {
 	conn net.Conn
 	r    *bufio.Reader
@@ -149,7 +151,7 @@ type EventStream struct {
 func Subscribe(sock string, kinds []string) (*EventStream, error) {
 	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("подключение к %s: %w", sock, err)
+		return nil, fmt.Errorf("connecting to %s: %w", sock, err)
 	}
 	subs := make([]map[string]string, 0, len(kinds))
 	for _, k := range kinds {
@@ -166,19 +168,19 @@ func Subscribe(sock string, kinds []string) (*EventStream, error) {
 	}
 	if _, err := conn.Write(append(payload, '\n')); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("запись events.subscribe: %w", err)
+		return nil, fmt.Errorf("writing events.subscribe: %w", err)
 	}
 
 	r := bufio.NewReaderSize(conn, 1<<20)
 	line, err := r.ReadBytes('\n')
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("чтение подтверждения подписки: %w", err)
+		return nil, fmt.Errorf("reading subscription ack: %w", err)
 	}
 	var resp response
 	if err := json.Unmarshal(line, &resp); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("подтверждение подписки не разобрано: %w", err)
+		return nil, fmt.Errorf("cannot parse subscription ack: %w", err)
 	}
 	if resp.Error != nil {
 		conn.Close()
@@ -187,15 +189,15 @@ func Subscribe(sock string, kinds []string) (*EventStream, error) {
 	var started eventKind
 	if err := json.Unmarshal(resp.Result, &started); err != nil || started.Type != "subscription_started" {
 		conn.Close()
-		return nil, fmt.Errorf("неожиданный ответ на подписку: %s", resp.Result)
+		return nil, fmt.Errorf("unexpected subscription reply: %s", resp.Result)
 	}
 	return &EventStream{conn: conn, r: r}, nil
 }
 
 func (s *EventStream) Close() error { return s.conn.Close() }
 
-// Next возвращает следующее событие. Строки, которые не разбираются как
-// конверт события, пропускаются.
+// Next returns the next event. Lines that do not parse as an event envelope
+// are skipped.
 func (s *EventStream) Next() (*eventEnvelope, error) {
 	for {
 		line, err := s.r.ReadBytes('\n')

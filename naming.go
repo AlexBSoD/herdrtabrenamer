@@ -10,20 +10,21 @@ import (
 	"unicode/utf8"
 )
 
-// Шаблон имени таба. Токены: {agent} {dir} {cwd} {title} {status} {number}.
-// Литералы между токенами (разделители) выбрасываются, если хотя бы один из
-// соседних токенов пуст — иначе "{agent}:{dir}" без агента давал бы ":nixos".
+// Template of a tab name. Tokens: {agent} {dir} {cwd} {title} {status}
+// {number}. Literals between tokens (separators) are dropped when either
+// neighbouring token is empty — otherwise "{agent}:{dir}" without an agent
+// would render as ":nixos".
 type Template struct {
 	parts []templatePart
 }
 
 type templatePart struct {
 	literal string
-	token   string // непусто, если это токен
+	token   string // non-empty when this part is a token
 }
 
-// Токен может перечислять альтернативы через "|": {proc|agent} берёт имя
-// процесса, а если его нет — имя агента.
+// A token may list alternatives separated by "|": {proc|agent} takes the
+// process name, falling back to the agent name.
 var tokenRe = regexp.MustCompile(`\{([a-z_|]+)\}`)
 
 func ParseTemplate(s string) Template {
@@ -42,7 +43,7 @@ func ParseTemplate(s string) Template {
 	return Template{parts: parts}
 }
 
-// NameContext — значения токенов для одного таба.
+// NameContext holds the token values for a single tab.
 type NameContext struct {
 	Agent  string
 	Proc   string
@@ -54,7 +55,7 @@ type NameContext struct {
 	Number int
 }
 
-// token отдаёт значение токена; для "a|b|c" — первое непустое.
+// token returns the value of a token; for "a|b|c" the first non-empty one.
 func (c NameContext) token(name string) string {
 	for _, alt := range strings.Split(name, "|") {
 		if v := c.single(alt); v != "" {
@@ -87,8 +88,9 @@ func (c NameContext) single(name string) string {
 	}
 }
 
-// DefaultIcons — цвет в таб-баре задать нечем (в socket API нет ни цветов, ни
-// стилей), поэтому индикатор статуса делается эмодзи: они несут свой цвет.
+// DefaultIcons: there is no way to set a colour in the tab bar (the socket API
+// has neither colours nor styles), so the status indicator is an emoji —
+// emoji carry their own colour.
 var DefaultIcons = map[string]string{
 	"blocked": "🔴",
 	"working": "🟡",
@@ -97,8 +99,8 @@ var DefaultIcons = map[string]string{
 	"unknown": "",
 }
 
-// ParseIcons разбирает "working=🟡,done=✅" поверх набора по умолчанию.
-// Пустое значение справа убирает иконку для статуса.
+// ParseIcons parses "working=🟡,done=✅" on top of the default set.
+// An empty value on the right-hand side removes the icon for that status.
 func ParseIcons(s string) (map[string]string, error) {
 	icons := make(map[string]string, len(DefaultIcons))
 	for k, v := range DefaultIcons {
@@ -114,11 +116,11 @@ func ParseIcons(s string) (map[string]string, error) {
 		}
 		k, v, ok := strings.Cut(pair, "=")
 		if !ok {
-			return nil, fmt.Errorf("ожидалось статус=иконка, получено %q", pair)
+			return nil, fmt.Errorf("expected status=icon, got %q", pair)
 		}
 		k = strings.TrimSpace(k)
 		if _, known := DefaultIcons[k]; !known {
-			return nil, fmt.Errorf("неизвестный статус %q (известны: blocked, working, done, idle, unknown)", k)
+			return nil, fmt.Errorf("unknown status %q (known: blocked, working, done, idle, unknown)", k)
 		}
 		icons[k] = strings.TrimSpace(v)
 	}
@@ -127,8 +129,8 @@ func ParseIcons(s string) (map[string]string, error) {
 
 func (t Template) Render(ctx NameContext) string {
 	var out strings.Builder
-	pending := ""     // литералы, ещё не решившие свою судьбу
-	dropNext := false // предыдущий токен был пуст — съедаем и разделитель за ним
+	pending := ""     // literals whose fate is not decided yet
+	dropNext := false // the previous token was empty — eat the separator after it too
 	haveValue := false
 
 	for _, p := range t.parts {
@@ -138,8 +140,8 @@ func (t Template) Render(ctx NameContext) string {
 		}
 		v := strings.TrimSpace(ctx.token(p.token))
 		if v == "" {
-			// Пустой токен забирает с собой разделители с обеих сторон:
-			// "{agent}:{dir}" без агента даёт "nixos", а не ":nixos".
+			// An empty token takes the separators on both sides with it:
+			// "{agent}:{dir}" without an agent renders "nixos", not ":nixos".
 			pending = ""
 			dropNext = true
 			continue
@@ -153,16 +155,16 @@ func (t Template) Render(ctx NameContext) string {
 		out.WriteString(v)
 		haveValue = true
 	}
-	// Замыкающий литерал нужен, только если после него не было съеденного
-	// токена: "[{status}]" со статусом даёт "[idle]", без статуса — "".
+	// A trailing literal is only kept when no token was eaten after it:
+	// "[{status}]" renders "[idle]" with a status and "" without one.
 	if haveValue && !dropNext {
 		out.WriteString(pending)
 	}
 	return strings.TrimSpace(out.String())
 }
 
-// Truncate обрезает имя по видимым символам, а не байтам — иначе кириллица
-// и символы статусов режутся посередине рун.
+// Truncate cuts a name by visible characters rather than bytes — otherwise
+// non-ASCII text and status symbols get sliced in the middle of a rune.
 func Truncate(s string, max int) string {
 	if max <= 0 || utf8.RuneCountInString(s) <= max {
 		return s
@@ -174,8 +176,8 @@ func Truncate(s string, max int) string {
 	return string(runes[:max-1]) + "…"
 }
 
-// PrettyDir — короткое имя каталога: basename, но $HOME превращается в "~",
-// а корень репозитория остаётся узнаваемым.
+// PrettyDir is a short directory name: the basename, except $HOME becomes "~",
+// so that a repository root stays recognizable.
 func PrettyDir(path string) string {
 	if path == "" {
 		return ""
@@ -192,26 +194,26 @@ func PrettyDir(path string) string {
 	return filepath.Base(clean)
 }
 
-// shells — то, что запущено в панели «просто так»: имя шелла в названии таба
-// бесполезно, поэтому такой процесс считается отсутствующим.
+// shells lists what runs in a pane "by default": a shell name in a tab title
+// carries no information, so such a process counts as absent.
 var shells = map[string]bool{
 	"fish": true, "bash": true, "zsh": true, "sh": true, "dash": true,
 	"ksh": true, "csh": true, "tcsh": true, "nu": true, "elvish": true,
 	"xonsh": true, "login": true,
 }
 
-// wrapperSuffixes — обвязки, которые нацепляет NixOS: .claude-wrapped,
-// btop-wrap и прочее. Из имени их нужно убрать.
+// wrapperSuffixes are the wrappers NixOS adds: .claude-wrapped, btop-wrap and
+// friends. They have to be stripped from the name.
 var wrapperSuffixes = []string{"-wrapped", "-wrap"}
 
-// ProcName вытаскивает человекочитаемое имя foreground-процесса панели.
-// Пустая строка означает «ничего интереснее шелла не запущено».
+// ProcName extracts a human-readable name of the pane's foreground process.
+// An empty string means "nothing more interesting than a shell is running".
 func ProcName(info *paneProcessInfo) string {
 	if info == nil || len(info.ForegroundProcesses) == 0 {
 		return ""
 	}
-	// В группе может быть несколько процессов (агент плюс его MCP-сервера);
-	// нужен лидер группы, а не случайный дочерний.
+	// A group may contain several processes (an agent plus its MCP servers);
+	// we want the group leader, not a random child.
 	proc := info.ForegroundProcesses[0]
 	for _, p := range info.ForegroundProcesses {
 		if info.ForegroundProcessGroupID != 0 && p.PID == info.ForegroundProcessGroupID {
@@ -257,18 +259,18 @@ func cleanProcName(s string) string {
 	return s
 }
 
-// autoLabelRe — метки, которые herdr генерирует сам, когда
-// ui.prompt_new_tab_name = false: просто порядковый номер.
+// autoLabelRe matches the labels herdr generates on its own when
+// ui.prompt_new_tab_name = false: just the ordinal number.
 var autoLabelRe = regexp.MustCompile(`^\d+$`)
 
-// IsGeneratedLabel сообщает, выглядит ли метка как автоматическая. Такие метки
-// можно перезаписывать без спроса; всё остальное считаем ручным именем.
+// IsGeneratedLabel reports whether a label looks auto-generated. Such labels
+// may be overwritten without asking; everything else counts as a human name.
 func IsGeneratedLabel(label string) bool {
 	return label == "" || autoLabelRe.MatchString(strings.TrimSpace(label))
 }
 
-// leadPane выбирает панель, по которой называется таб: сначала панель с
-// определённым агентом, затем сфокусированная, затем первая по pane_id.
+// leadPane picks the pane a tab is named after: first a pane with a detected
+// agent, then the focused one, then the lowest pane_id.
 func leadPane(panes []paneInfo) *paneInfo {
 	var withAgent, focused, first *paneInfo
 	for i := range panes {
@@ -293,8 +295,8 @@ func leadPane(panes []paneInfo) *paneInfo {
 	}
 }
 
-// contextFor собирает значения токенов из панели и таба.
-// proc — имя foreground-процесса ведущей панели (может быть пустым).
+// contextFor collects token values from a pane and a tab.
+// proc is the foreground process name of the lead pane (may be empty).
 func contextFor(tab tabInfo, pane *paneInfo, proc string, icons map[string]string) NameContext {
 	ctx := NameContext{Number: tab.Number, Status: tab.AgentStatus, Proc: proc}
 	if pane != nil {
