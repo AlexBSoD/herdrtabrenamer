@@ -88,12 +88,13 @@ type renamer struct {
 	// would otherwise overlap and rename the same tab twice.
 	passMu sync.Mutex
 
-	mu        sync.Mutex
-	state     *state               // our labels, survives a restart
-	dryShown  map[string]string    // tab_id -> what we already printed in dry-run
-	manual    map[string]bool      // tab_id -> the name is human-made, do not touch
-	procCache map[string]procEntry // pane_id -> foreground process name
-	timer     *time.Timer          // event coalescing; a pass covers all workspaces
+	mu          sync.Mutex
+	state       *state               // our labels, survives a restart
+	dryShown    map[string]string    // tab_id -> what we already printed in dry-run
+	manual      map[string]bool      // tab_id -> the name is human-made, do not touch
+	procCache   map[string]procEntry // pane_id -> foreground process name
+	timer       *time.Timer          // event coalescing; a pass covers all workspaces
+	pollFailing bool                 // a poll error was already reported
 }
 
 func main() {
@@ -138,9 +139,22 @@ func main() {
 			iconMap["blocked"], iconMap["working"], iconMap["done"], iconMap["idle"], iconMap["unknown"])
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	cli, err := Dial(*sock)
 	if err != nil {
-		log.Fatalf("herdr is unreachable: %v (is the server running? `herdr status`)", err)
+		if *once {
+			log.Fatalf("herdr is unreachable: %v (is the server running? `herdr status`)", err)
+		}
+		// Running as a user service we are quite likely to start before herdr
+		// does, and herdr may be stopped and started again at any time. Waiting
+		// beats exiting and having the supervisor restart us in a loop.
+		log.Printf("herdr is unreachable: %v — waiting for the socket", err)
+		if cli, err = dialWait(ctx, *sock); err != nil {
+			log.Print("stopped")
+			return
+		}
 	}
 	defer cli.Close()
 
@@ -173,9 +187,6 @@ func main() {
 		procCache: map[string]procEntry{},
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	if *once {
 		if err := r.pass(); err != nil {
 			log.Fatalf("the first pass failed: %v", err)
@@ -195,6 +206,23 @@ func main() {
 		log.Fatalf("the event stream broke: %v", err)
 	}
 	log.Print("stopped")
+}
+
+// dialWait retries the connection until herdr shows up or we are asked to stop.
+func dialWait(ctx context.Context, sock string) (*Client, error) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		cli, err := Dial(sock)
+		if err == nil {
+			log.Print("herdr answered, carrying on")
+			return cli, nil
+		}
+		if !sleepCtx(ctx, backoff) {
+			break
+		}
+		backoff = min(backoff*2, 30*time.Second)
+	}
+	return nil, ctx.Err()
 }
 
 func enabledIf(ok bool) string {
@@ -420,10 +448,29 @@ func (r *renamer) pollLoop(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.pass(); err != nil && ctx.Err() == nil {
-				log.Printf("poll failed: %v", err)
+			err := r.pass()
+			if ctx.Err() != nil {
+				return
 			}
+			r.reportPoll(err)
 		}
+	}
+}
+
+// reportPoll logs a poll failure once and then stays quiet until it recovers.
+// With herdr stopped every single poll fails, and a line per -poll interval
+// would bury the journal — this daemon is meant to run as a user service.
+func (r *renamer) reportPoll(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	switch {
+	case err != nil && !r.pollFailing:
+		r.pollFailing = true
+		log.Printf("poll failed: %v (staying quiet until it recovers)", err)
+	case err == nil && r.pollFailing:
+		r.pollFailing = false
+		log.Print("poll recovered")
 	}
 }
 
@@ -431,15 +478,23 @@ func (r *renamer) pollLoop(ctx context.Context, every time.Duration) {
 // (a herdr restart, a live handoff during an update).
 func (r *renamer) watch(ctx context.Context, sock string, subs []string) error {
 	backoff := time.Second
+	failing := false // the same silencing as in reportPoll, for the same reason
 	for ctx.Err() == nil {
 		stream, err := Subscribe(sock, subs)
 		if err != nil {
-			log.Printf("subscription failed (%v), retrying in %s", err, backoff)
+			if !failing {
+				failing = true
+				log.Printf("subscription failed (%v), retrying quietly", err)
+			}
 			if !sleepCtx(ctx, backoff) {
 				return ctx.Err()
 			}
 			backoff = min(backoff*2, 30*time.Second)
 			continue
+		}
+		if failing {
+			failing = false
+			log.Print("subscription restored")
 		}
 		backoff = time.Second
 

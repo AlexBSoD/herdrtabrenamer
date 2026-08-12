@@ -97,6 +97,26 @@ Stopping it:
 pkill -x herdrtabrenamer
 ```
 
+### As a service
+
+The flake ships a home-manager module:
+
+```nix
+# flake.nix
+inputs.herdrtabrenamer.url = "github:AlexBSoD/herdrtabrenamer";
+# ... home-manager.sharedModules = [ herdrtabrenamer.homeModules.default ];
+
+services.herdrtabrenamer = {
+  enable = true;
+  format = "{icon} {proc|agent}:{dir}"; # optional, defaults to {proc|dir}
+};
+```
+
+Outside watch mode a missing server is fatal, but the daemon proper waits for
+the socket instead of exiting, and it stays quiet while it waits — so starting
+before herdr, or living through a `herdr server stop`, costs one log line rather
+than a restart loop.
+
 Note the `-x`, matching the process name. `pkill -f 'herdrtabrenamer -apply'`
 also matches the command line of your own shell and kills it along with the
 daemon.
