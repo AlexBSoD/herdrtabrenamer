@@ -353,6 +353,11 @@ func SSHName(args []string) string {
 	if host == "" {
 		return ""
 	}
+	// An address is not a name: "@rzn" beats "@192.168.6.70", and the alias is
+	// what the connection was typed under anyway.
+	if alias := hostAlias(host); alias != "" {
+		host = alias
+	}
 	name := "@" + host
 	if cmd := cleanProcName(firstField(strings.Join(remote, " "))); cmd != "" && !shells[cmd] {
 		name += ":" + cmd

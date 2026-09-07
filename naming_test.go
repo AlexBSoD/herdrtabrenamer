@@ -336,6 +336,7 @@ func TestLooksOursAcrossProcessAppearance(t *testing.T) {
 }
 
 func TestSSHName(t *testing.T) {
+	stubHostAlias(t, nil)
 	cases := []struct {
 		name string
 		args []string
@@ -369,6 +370,7 @@ func TestSSHName(t *testing.T) {
 }
 
 func TestProcNameNamesSSHAfterItsHost(t *testing.T) {
+	stubHostAlias(t, map[string]string{"zmb": "zmb"})
 	// argv is the honest source when the server fills it.
 	info := &paneProcessInfo{
 		ShellPid:                 100,

@@ -180,6 +180,14 @@ pi holds a meaningful line about the current task.
   appended like a local process (`ssh zmb btop` → `@zmb:btop`); a remote shell
   adds nothing, just like a local one. What runs *inside* an interactive
   remote shell is invisible from here — the pane only ever sees `ssh`.
+- an address is resolved back to its `~/.ssh/config` alias: `ssh 192.168.6.70`
+  is named `@rzn`, because a tab bar full of octets tells nobody anything. The
+  map is `HostName` → the first `Host` that declares it, so two aliases for one
+  address (`restic` and `zombie` both on `chat.havent.info`) resolve to
+  whichever comes first in the file. Patterns (`Host *`), `Match` blocks and a
+  `HostName` containing `%h` are skipped — none of them is a name. The config
+  is re-read whenever it changes on disk, so a home-manager switch that adds a
+  host does not need a restart.
 
 The tab name is taken from the "lead" pane: first a pane with a detected agent,
 then the focused one, then the lowest `pane_id`.
