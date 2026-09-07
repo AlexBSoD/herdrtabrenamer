@@ -171,6 +171,15 @@ pi holds a meaningful line about the current task.
   leading dot are stripped
 - from the group we pick the process with `pid == foreground_process_group_id`,
   not the first one in the list
+- `ssh` is named after the host instead: `ssh zmb` becomes `@zmb`, because
+  otherwise every remote session — and there are usually several — is called
+  `ssh` and they are indistinguishable in the tab bar. The destination is read
+  out of the arguments the way ssh itself reads it, so a flag value is never
+  mistaken for the host (`ssh -p 2222 zmb`, `ssh -J gate zmb`), and `user@`,
+  an `ssh://` URI and a trailing port are dropped. A remote command is
+  appended like a local process (`ssh zmb btop` → `@zmb:btop`); a remote shell
+  adds nothing, just like a local one. What runs *inside* an interactive
+  remote shell is invisible from here — the pane only ever sees `ssh`.
 
 The tab name is taken from the "lead" pane: first a pane with a detected agent,
 then the focused one, then the lowest `pane_id`.

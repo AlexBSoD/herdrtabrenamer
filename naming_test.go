@@ -334,3 +334,65 @@ func TestLooksOursAcrossProcessAppearance(t *testing.T) {
 		t.Error("a human name must not count as ours")
 	}
 }
+
+func TestSSHName(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"bare host", []string{"zmb"}, "@zmb"},
+		{"user@host", []string{"srv@192.168.6.220"}, "@192.168.6.220"},
+		{"flag with a separate value", []string{"-p", "2222", "zmb"}, "@zmb"},
+		{"flag with a glued value", []string{"-p2222", "zmb"}, "@zmb"},
+		{"boolean flags bundled with one taking a value", []string{"-tp", "2222", "zmb"}, "@zmb"},
+		{"option with an equals sign", []string{"-o", "BatchMode=yes", "zmb"}, "@zmb"},
+		{"identity file", []string{"-i", "~/.ssh/bsod", "-A", "zmb"}, "@zmb"},
+		{"jump host is a flag value, not the destination", []string{"-J", "gate", "zmb"}, "@zmb"},
+		{"remote command", []string{"zmb", "btop"}, "@zmb:btop"},
+		{"remote command with a path and arguments", []string{"zmb", "/usr/bin/btop", "-p"}, "@zmb:btop"},
+		{"a remote shell adds nothing", []string{"zmb", "fish"}, "@zmb"},
+		{"double dash ends the flags", []string{"--", "-weird-host"}, "@-weird-host"},
+		{"ssh uri", []string{"ssh://srv@zmb:2222"}, "@zmb"},
+		{"ipv6 in brackets keeps its colons", []string{"[2001:db8::1]:2222"}, "@2001:db8::1"},
+		{"no destination at all", []string{"-V"}, ""},
+		{"no arguments", nil, ""},
+		{"a flag that swallows the only word left", []string{"-p"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SSHName(c.args); got != c.want {
+				t.Errorf("SSHName(%q) = %q, want %q", c.args, got, c.want)
+			}
+		})
+	}
+}
+
+func TestProcNameNamesSSHAfterItsHost(t *testing.T) {
+	// argv is the honest source when the server fills it.
+	info := &paneProcessInfo{
+		ShellPid:                 100,
+		ForegroundProcessGroupID: 200,
+		ForegroundProcesses: []paneProcess{{
+			PID:     200,
+			Name:    "ssh",
+			Cmdline: "ssh zmb",
+			Argv:    []string{"ssh", "-p", "22", "srv@zmb"},
+		}},
+	}
+	if got := ProcName(info); got != "@zmb" {
+		t.Errorf("got %q, want @zmb", got)
+	}
+
+	// Without argv the arguments have to come out of cmdline.
+	info.ForegroundProcesses = []paneProcess{{PID: 200, Name: "ssh", Cmdline: "ssh zmb btop"}}
+	if got := ProcName(info); got != "@zmb:btop" {
+		t.Errorf("got %q, want @zmb:btop", got)
+	}
+
+	// An ssh with no destination keeps the plain process name.
+	info.ForegroundProcesses = []paneProcess{{PID: 200, Name: "ssh", Cmdline: "ssh -V"}}
+	if got := ProcName(info); got != "ssh" {
+		t.Errorf("got %q, want ssh", got)
+	}
+}

@@ -252,6 +252,13 @@ func ProcName(info *paneProcessInfo) string {
 	if shells[name] {
 		return ""
 	}
+	if name == "ssh" {
+		// Every remote session would otherwise be called "ssh"; the host is
+		// what tells them apart.
+		if remote := SSHName(procArgs(proc)); remote != "" {
+			return remote
+		}
+	}
 	return name
 }
 
@@ -274,6 +281,95 @@ func cleanProcName(s string) string {
 		s = strings.TrimSuffix(s, suffix)
 	}
 	return s
+}
+
+// sshFlagsWithArg lists the ssh options that swallow the next word, so that
+// the host is not confused with the value of a flag: in `ssh -p 2222 zmb` the
+// destination is zmb, not 2222. A value may also be glued to its flag (-p2222)
+// or come after a bundle of boolean ones (-tp 2222).
+const sshFlagsWithArg = "BbcDEeFIiJLlmOopQRSWw"
+
+// sshDestination extracts the destination and the remote command from the
+// arguments of an ssh invocation. Both are empty when the arguments hold no
+// destination at all (`ssh -V`, or a bare `ssh`).
+func sshDestination(args []string) (dest string, remote []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			if i+1 < len(args) {
+				return args[i+1], args[i+2:]
+			}
+			return "", nil
+		case len(arg) > 1 && arg[0] == '-':
+			// A bundle of short options: the first one that takes a value ends
+			// the token, and the value is either the rest of it or the next word.
+			for j := 1; j < len(arg); j++ {
+				if !strings.ContainsRune(sshFlagsWithArg, rune(arg[j])) {
+					continue
+				}
+				if j == len(arg)-1 {
+					i++ // the value is the next word
+				}
+				break
+			}
+		default:
+			return arg, args[i+1:]
+		}
+	}
+	return "", nil
+}
+
+// sshHost reduces a destination to the bare host: user@host, an ssh:// URI and
+// a trailing port are all noise in a tab name.
+func sshHost(dest string) string {
+	host := strings.TrimPrefix(dest, "ssh://")
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	host = strings.TrimSuffix(host, "/")
+	if strings.HasPrefix(host, "[") { // [2001:db8::1]:22
+		if end := strings.Index(host, "]"); end > 0 {
+			return host[1:end]
+		}
+	}
+	// A port only ever follows the host in the URI form; a bare IPv6 address
+	// has several colons and no port, so a single one is the separator.
+	if strings.Count(host, ":") == 1 {
+		host = host[:strings.Index(host, ":")]
+	}
+	return host
+}
+
+// SSHName names a pane running ssh after the host it is connected to: "@zmb"
+// rather than the "ssh" every such tab would otherwise be called. A remote
+// command is appended the way a local process is — `ssh zmb btop` reads
+// "@zmb:btop" — while a remote shell adds nothing, same as a local one.
+// An empty string means the arguments carried no destination, and the caller
+// keeps the plain process name.
+func SSHName(args []string) string {
+	dest, remote := sshDestination(args)
+	host := sshHost(dest)
+	if host == "" {
+		return ""
+	}
+	name := "@" + host
+	if cmd := cleanProcName(firstField(strings.Join(remote, " "))); cmd != "" && !shells[cmd] {
+		name += ":" + cmd
+	}
+	return name
+}
+
+// procArgs returns the arguments of a process without argv[0]. Argv is the
+// honest source; cmdline is the fallback for a server that does not fill it.
+func procArgs(p paneProcess) []string {
+	if len(p.Argv) > 0 {
+		return p.Argv[1:]
+	}
+	if fields := strings.Fields(p.Cmdline); len(fields) > 0 {
+		return fields[1:]
+	}
+	return nil
 }
 
 // autoLabelRe matches the labels herdr generates on its own when
